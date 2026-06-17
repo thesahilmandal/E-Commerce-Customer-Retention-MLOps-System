@@ -1,0 +1,168 @@
+# ==========================================
+# Python & Environments
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# Machine Learning & Data
+# ==========================================
+
+# Data directories
+data/
+datasets/
+raw_data/
+
+# Pipeline outputs
+artifacts/
+logs/
+model_registry/
+online/
+project_structure.txt
+
+# Temporary experiments
+experiments/
+runs/
+mlruns/
+
+# MongoDB test scripts / scratch files
+rough/
+test_mongodb.py
+main_0.py
+
+# ==========================================
+# Model Artifacts
+# ==========================================
+
+# Serialized models
+*.pkl
+*.joblib
+*.model
+*.h5
+*.pth
+*.pt
+*.onnx
+*.pb
+*.ckpt
+
+# TensorBoard
+tfevents*
+logs/
+
+# ==========================================
+# Large Files / Archives
+# ==========================================
+
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.gz
+
+# AWS installer or downloads
+aws/
+awscliv2.zip
+
+# ==========================================
+# Cloud & Credentials
+# ==========================================
+
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# AWS credentials
+.aws/
+credentials
+config
+
+# GCP
+gcloud.json
+service_account.json
+
+# ==========================================
+# DVC
+# ==========================================
+
+.dvc/cache/
+
+# ==========================================
+# Jupyter
+# ==========================================
+
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ==========================================
+# IDEs & Editors
+# ==========================================
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm
+.idea/
+
+# ==========================================
+# System Files
+# ==========================================
+
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ==========================================
+# Docker
+# ==========================================
+
+docker-compose.override.yml
+*.log
+
+# ==========================================
+# Misc
+# ==========================================
+
+coverage/
+htmlcov/
+.cache/
+.pytest_cache/
+
+# Local scripts
+secrets.json
+mlflow.db
