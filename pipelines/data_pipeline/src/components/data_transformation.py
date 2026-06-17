@@ -2,14 +2,13 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List
 
 import duckdb
 
-from pipelines.data_pipeline.src.entity.config_entity import DataPipelineTransformerConfig
+from pipelines.data_pipeline.src.entity.config_entity import DataTransformationConfig
 from pipelines.data_pipeline.src.entity.artifact_entity import (
-    DataPipelineExtractorArtifact,
-    DataPipelineTransformerArtifact,
+    DataExtractorArtifact,
+    DataTransformationArtifact,
 )
 from shared_core.features.shared_feature import SharedFeatureGenerator
 from shared_core.utils.main_utils import write_json_file
@@ -17,7 +16,7 @@ from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
 
-class Transformer:
+class DataTransformation:
     """
     Transformer component for generating the Training Master Feature Panel.
 
@@ -31,8 +30,8 @@ class Transformer:
 
     def __init__(
         self,
-        config: DataPipelineTransformerConfig,
-        extractor_artifact: DataPipelineExtractorArtifact,
+        config: DataTransformationConfig,
+        extractor_artifact: DataExtractorArtifact,
     ) -> None:
         try:
             self.config = config
@@ -58,7 +57,7 @@ class Transformer:
     # ==========================================================
     # PUBLIC ENTRYPOINT
     # ==========================================================
-    def run(self) -> DataPipelineTransformerArtifact:
+    def run(self) -> DataTransformationArtifact:
         try:
             logging.info("Starting Data Transformation pipeline via DuckDB.")
             start_time = time.time()
@@ -71,7 +70,7 @@ class Transformer:
                 execution_time = round(time.time() - start_time, 2)
                 self._generate_metadata(con, execution_time)
 
-                artifact = DataPipelineTransformerArtifact(
+                artifact = DataTransformationArtifact(
                     transformed_data_file_path=self.transformed_data_file_path,
                     metadata_file_path=self.config.metadata_file_path,
                 )

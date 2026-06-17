@@ -5,15 +5,15 @@ from typing import Dict, Any, List
 
 import duckdb
 
-from pipelines.data_pipeline.src.entity.config_entity import DataPipelineExtractorConfig
-from pipelines.data_pipeline.src.entity.artifact_entity import DataPipelineExtractorArtifact
+from pipelines.data_pipeline.src.entity.config_entity import DataExtractorConfig
+from pipelines.data_pipeline.src.entity.artifact_entity import DataExtractorArtifact
 from shared_core.utils.main_utils import write_json_file
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.cloud.s3_operations import S3Sync
 
 
-class Extractor:
+class DataExtractor:
     """
     Extractor component for downloading and preparing raw datasets.
 
@@ -24,7 +24,7 @@ class Extractor:
     - Generate metadata for pipeline observability and lineage.
     """
 
-    def __init__(self, config: DataPipelineExtractorConfig) -> None:
+    def __init__(self, config: DataExtractorConfig) -> None:
         """
         Initializes Extractor with configuration and S3 sync utility.
         """
@@ -43,7 +43,7 @@ class Extractor:
     # ==========================================================
     # PUBLIC ENTRYPOINT
     # ==========================================================
-    def run(self) -> DataPipelineExtractorArtifact:
+    def run(self) -> DataExtractorArtifact:
         """
         Executes the main extraction pipeline.
 
@@ -74,7 +74,7 @@ class Extractor:
             self._generate_metadata(stored_files_map, schema_info)
 
             # Package and return Artifact
-            artifact = DataPipelineExtractorArtifact(
+            artifact = DataExtractorArtifact(
                 raw_data_dir_path=self.config.raw_data_dir_path,
                 raw_data_schema_file_path=self.config.raw_data_schema_file_path,
                 metadata_file_path=self.config.metadata_file_path,

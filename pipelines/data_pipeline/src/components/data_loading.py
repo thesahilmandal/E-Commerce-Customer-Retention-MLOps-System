@@ -6,10 +6,10 @@ from typing import Dict, Any
 
 import pyarrow.parquet as pq
 
-from pipelines.data_pipeline.src.entity.config_entity import DataPipelineLoaderConfig
+from pipelines.data_pipeline.src.entity.config_entity import DataLoadingConfig
 from pipelines.data_pipeline.src.entity.artifact_entity import (
-    DataPipelineTransformerArtifact,
-    DataPipelineLoaderArtifact,
+    DataTransformationArtifact,
+    DataLoadingArtifact,
 )
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
@@ -17,7 +17,7 @@ from shared_core.utils.main_utils import write_json_file
 from shared_core.cloud.s3_operations import S3Sync
 
 
-class Loader:
+class DataLoading:
     """
     Loader component for persisting the Master Feature Panel to AWS S3.
 
@@ -31,15 +31,15 @@ class Loader:
 
     def __init__(
         self,
-        config: DataPipelineLoaderConfig,
-        transformer_artifact: DataPipelineTransformerArtifact,
+        config: DataLoadingConfig,
+        transformer_artifact: DataTransformationArtifact,
     ) -> None:
         """
         Initializes Loader with required configuration and artifacts.
         """
         try:
-            self.config: DataPipelineLoaderConfig = config
-            self.transformer_artifact: DataPipelineTransformerArtifact = transformer_artifact
+            self.config: DataLoadingConfig = config
+            self.transformer_artifact: DataTransformationArtifact = transformer_artifact
             
             # The definitive local path is strictly owned by the Transformer
             self.source_parquet_path: str = self.transformer_artifact.transformed_data_file_path
@@ -54,7 +54,7 @@ class Loader:
     # ==========================================================
     # PUBLIC ENTRYPOINT
     # ==========================================================
-    def run(self) -> DataPipelineLoaderArtifact:
+    def run(self) -> DataLoadingArtifact:
         """
         Executes the data loading and S3 upload process out-of-core.
 
@@ -73,7 +73,7 @@ class Loader:
             self._generate_metadata(execution_time)
 
             # 3. Package Artifact
-            artifact = DataPipelineLoaderArtifact(
+            artifact = DataLoadingArtifact(
                 s3_file_uri=self.config.s3_master_panel_uri,
                 metadata_file_path=self.config.metadata_file_path,
             )

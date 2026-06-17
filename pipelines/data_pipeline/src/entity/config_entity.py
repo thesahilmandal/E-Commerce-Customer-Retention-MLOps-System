@@ -2,10 +2,10 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from shared_core import global_constants
+from shared_core import constants
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
-from pipelines.data_pipeline.src import constants
+
 
 class DataPipelineConfig:
     """
@@ -18,7 +18,7 @@ class DataPipelineConfig:
             self.run_id: str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
             self.root_dir: str = os.path.join(
-                global_constants.ARTIFACT_DIR_NAME,
+                constants.ARTIFACT_DIR_NAME,
                 constants.DATA_PIPELINE_ROOT_DIR_NAME,
                 self.run_id,
             )
@@ -30,7 +30,7 @@ class DataPipelineConfig:
             raise CustomException(e, sys) from e
 
 
-class DataPipelineExtractorConfig:
+class DataExtractorConfig:
     """
     Configuration for the Extractor component.
     Defines local directory paths for extracted data and remote S3 paths for ingestion.
@@ -55,8 +55,8 @@ class DataPipelineExtractorConfig:
                 constants.EXTRACTOR_METADATA_FILE_NAME,
             )
 
-            self.s3_bucket_name: str = global_constants.S3_BUCKET_NAME
-            self.s3_raw_data_dir: str = global_constants.S3_RAW_DATA_DIR_NAME
+            self.s3_bucket_name: str = constants.S3_BUCKET_NAME
+            self.s3_raw_data_dir: str = constants.S3_RAW_DATA_DIR_NAME
             self.s3_raw_data_uri: str = f"s3://{self.s3_bucket_name}/{self.s3_raw_data_dir}"
 
             logging.info("DataPipelineExtractorConfig initialized.")
@@ -66,7 +66,7 @@ class DataPipelineExtractorConfig:
             raise CustomException(e, sys) from e
 
 
-class DataPipelineValidatorConfig:
+class DataValidationConfig:
     """
     Configuration for the Validator component.
     Defines paths for validation reports and the reference schema.
@@ -92,7 +92,7 @@ class DataPipelineValidatorConfig:
             raise CustomException(e, sys) from e
 
 
-class DataPipelineTransformerConfig:
+class DataTransformationConfig:
     """
     Configuration for the Transformer component.
     Defines paths, core business logic parameters (target days, snapshots), and thread limits.
@@ -124,7 +124,7 @@ class DataPipelineTransformerConfig:
             raise CustomException(e, sys) from e
 
 
-class DataPipelineLoaderConfig:
+class DataLoadingConfig:
     """
     Configuration for the Loader component.
     Defines local artifact paths for metadata and remote S3 URIs for the feature store.
@@ -140,8 +140,8 @@ class DataPipelineLoaderConfig:
                 self.loader_root_dir,
                 constants.LOADER_METADATA_FILE_NAME,
             )
-            self.s3_bucket_name: str = global_constants.S3_BUCKET_NAME
-            self.s3_feature_store_dir: str = global_constants.S3_FEATURE_STORE_DIR_NAME
+            self.s3_bucket_name: str = constants.S3_BUCKET_NAME
+            self.s3_feature_store_dir: str = constants.S3_FEATURE_STORE_DIR_NAME
             self.s3_master_panel_uri: str = (
                 f"s3://{self.s3_bucket_name}/{self.s3_feature_store_dir}/"
                 f"{constants.LOADER_MASTER_PANEL_LOCAL_FILE_NAME}"

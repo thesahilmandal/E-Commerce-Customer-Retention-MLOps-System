@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class DataPipelineExtractorArtifact:
+class DataExtractorArtifact:
     """
     Artifact containing paths for the Extractor component outputs.
     """
@@ -21,7 +21,7 @@ class DataPipelineExtractorArtifact:
 
 
 @dataclass(frozen=True)
-class DataPipelineValidatorArtifact:
+class DataValidationArtifact:
     """
     Artifact containing the validation report path and boolean status.
     """
@@ -38,7 +38,7 @@ class DataPipelineValidatorArtifact:
 
 
 @dataclass(frozen=True)
-class DataPipelineTransformerArtifact:
+class DataTransformationArtifact:
     """
     Artifact containing paths for the Transformer component outputs.
     Contains the path to the definitive out-of-core generated Parquet file.
@@ -56,7 +56,7 @@ class DataPipelineTransformerArtifact:
 
 
 @dataclass(frozen=True)
-class DataPipelineLoaderArtifact:
+class DataLoadingArtifact:
     """
     Artifact containing remote (S3) path for the exported feature store
     and local path for the loader's telemetry metadata.

@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import kagglehub
 from tqdm import tqdm
 
-from shared_core import global_constants
+from shared_core import constants
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
@@ -20,7 +20,7 @@ class S3StreamingUploader:
     def __init__(self, logger):
         self.logger = logger
         self.s3_client = boto3.client("s3")
-        self.bucket = global_constants.S3_BUCKET_NAME
+        self.bucket = constants.S3_BUCKET_NAME
 
     def upload_parquet_stream(
         self,
@@ -115,7 +115,7 @@ class RawDataPipeline:
                         ".csv", ".parquet"
                     )
 
-                    s3_key = f"{global_constants.S3_RAW_DATA_DIR_NAME}/{file_name}"
+                    s3_key = f"{constants.S3_RAW_DATA_DIR_NAME}/{file_name}"
 
                     self.uploader.upload_parquet_stream(
                         df_iter,

@@ -2,10 +2,10 @@ import os
 import sys
 from typing import Dict, Any
 
-from pipelines.data_pipeline.src.entity.config_entity import DataPipelineValidatorConfig
+from pipelines.data_pipeline.src.entity.config_entity import DataValidationConfig
 from pipelines.data_pipeline.src.entity.artifact_entity import (
-    DataPipelineExtractorArtifact,
-    DataPipelineValidatorArtifact,
+    DataExtractorArtifact,
+    DataValidationArtifact,
 )
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
@@ -17,7 +17,7 @@ from shared_core.utils.main_utils import (
 )
 
 
-class Validator:
+class DataValidation:
     """
     Validator component for validating raw data against predefined schema.
 
@@ -30,8 +30,8 @@ class Validator:
 
     def __init__(
         self,
-        config: DataPipelineValidatorConfig,
-        extractor_artifact: DataPipelineExtractorArtifact,
+        config: DataValidationConfig,
+        extractor_artifact: DataExtractorArtifact,
     ):
         try:
             self.config = config
@@ -51,7 +51,7 @@ class Validator:
     # ==========================================================
     # PUBLIC ENTRYPOINT
     # ==========================================================
-    def run(self) -> DataPipelineValidatorArtifact:
+    def run(self) -> DataValidationArtifact:
         """
         Executes validation pipeline.
 
@@ -105,7 +105,7 @@ class Validator:
                 f"Validation report saved at: {self.config.report_file_path}"
             )
 
-            artifact = DataPipelineValidatorArtifact(
+            artifact = DataValidationArtifact(
                 report_file_path=self.config.report_file_path,
                 is_valid=is_valid,
             )
