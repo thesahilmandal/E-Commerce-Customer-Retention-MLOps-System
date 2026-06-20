@@ -102,8 +102,20 @@ class SharedFeatureGenerator:
                     o.customer_id,
                     TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) AS purchase_ts,
                     TRY_CAST(o.order_estimated_delivery_date AS TIMESTAMP) AS est_delivery_ts,
-                    TRY_CAST(o.order_delivered_customer_date AS TIMESTAMP) AS act_delivery_ts,
-                    o.order_status
+                    
+                    -- Mask future delivery timestamps to prevent target leakage
+                    CASE 
+                        WHEN TRY_CAST(o.order_delivered_customer_date AS TIMESTAMP) <= TIMESTAMP '{snapshot_date}' 
+                        THEN TRY_CAST(o.order_delivered_customer_date AS TIMESTAMP) 
+                        ELSE NULL 
+                    END AS act_delivery_ts,
+                    
+                    -- Mask future status updates to prevent target leakage
+                    CASE 
+                        WHEN TRY_CAST(o.order_delivered_customer_date AS TIMESTAMP) > TIMESTAMP '{snapshot_date}' 
+                        THEN 'processing'
+                        ELSE o.order_status
+                    END AS order_status
                 FROM read_parquet('{orders_path}', hive_partitioning={hive_flag}) o
                 WHERE TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) < TIMESTAMP '{snapshot_date}'
             ),
