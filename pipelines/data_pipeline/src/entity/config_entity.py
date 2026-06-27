@@ -5,7 +5,6 @@ from typing import Optional
 from pipelines.data_pipeline.src import constants
 from shared_core.logging.custom_logging import logging
 
-
 class DataPipelineConfig:
     """
     Base configuration for the Data Pipeline.
@@ -28,10 +27,12 @@ class DataPipelineConfig:
             logging.info("DataPipelineConfig initialized. New Run ID: %s", self.run_id)
 
 
+
 class DataExtractorConfig:
     """
     Configuration for the Extractor component.
-    Defines local directory paths for extracted data and remote S3 paths for ingestion.
+    Defines local directory paths for extracted data, remote S3 paths for ingestion,
+    and the path to the predefined schema used to determine required datasets.
     """
 
     def __init__(self, data_pipeline_config: DataPipelineConfig) -> None:
@@ -51,10 +52,12 @@ class DataExtractorConfig:
             self.extractor_root_dir,
             constants.EXTRACTOR_METADATA_FILE_NAME,
         )
+        self.predefined_schema_file_path: str = constants.REFERENCE_SCHEMA_FILE_PATH
 
         self.s3_bucket_name: str = constants.S3_BUCKET_NAME
         self.s3_raw_data_dir: str = constants.S3_RAW_DATA_DIR_NAME
         self.s3_raw_data_uri: str = f"s3://{self.s3_bucket_name}/{self.s3_raw_data_dir}"
+
 
 
 class DataValidationConfig:
@@ -74,6 +77,7 @@ class DataValidationConfig:
         )
         self.is_valid: Optional[bool] = None
         self.reference_schema_file_path: str = str(constants.REFERENCE_SCHEMA_FILE_PATH)
+
 
 
 class DataTransformationConfig:
@@ -104,6 +108,7 @@ class DataTransformationConfig:
 
         os.makedirs(self.transformer_root_dir, exist_ok=True)
         os.makedirs(self.duckdb_temp_dir, exist_ok=True)
+
 
 
 class DataLoadingConfig:
