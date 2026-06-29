@@ -8,14 +8,14 @@ load_dotenv()
 # ==========================================================
 # INFRASTRUCTURE & CLOUD CONFIGURATIONS
 # ==========================================================
-S3_BUCKET_NAME: str = os.getenv("ML_S3_BUCKET")
+S3_BUCKET_NAME: str = os.getenv("ML_S3_BUCKET_NAME")
 S3_RAW_DATA_DIR_NAME: str = os.getenv("S3_RAW_DATA_DIR")
 S3_FEATURE_STORE_DIR_NAME: str = os.getenv("S3_FEATURE_STORE_DIR")
 
 # ==========================================================
 # PIPELINE ARTIFACT DIRECTORIES
 # ==========================================================
-ARTIFACT_DIR_NAME: str = "artifacts"
+ARTIFACT_DIR_NAME: str = os.getenv("ARTIFACT_DIR_NAME")
 DATA_PIPELINE_ROOT_DIR_NAME: str = "data_pipeline"
 
 # 1. Extractor

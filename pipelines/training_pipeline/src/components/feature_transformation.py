@@ -1,10 +1,18 @@
+"""
+Feature Transformation Module for the Training Pipeline.
+
+This module enforces strict categorical schemas to prevent integer mapping misalignment 
+in XGBoost and dynamically infers an immutable JSON schema blueprint for downstream inference.
+It is highly memory-optimized, utilizing the PyArrow backend to prevent Out-Of-Memory (OOM) 
+bottlenecks during large-scale Parquet-to-Pandas data loading.
+"""
+
 import os
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
-import polars as pl
 import pandas as pd
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -44,9 +52,10 @@ class CategoricalSchemaEnforcer(BaseEstimator, TransformerMixin):
     def fit(self, X: pd.DataFrame, y: Any = None) -> "CategoricalSchemaEnforcer":
         """
         Learns the exact categorical mappings from the training feature matrix.
+        Safely identifies standard and PyArrow-backed string/object columns.
         """
         for col in X.columns:
-            if X[col].dtype == "object" or X[col].dtype.name == "string":
+            if pd.api.types.is_string_dtype(X[col]) or pd.api.types.is_object_dtype(X[col]):
                 unique_categories = X[col].dropna().unique()
                 self.schema_[col] = pd.CategoricalDtype(
                     categories=unique_categories, ordered=False
@@ -70,6 +79,7 @@ class FeatureTransformation:
 
     Responsibilities:
     - Act as a Strict Schema Enforcer rather than a heavy math processor.
+    - Resolve DataFrame memory bottlenecks by explicitly utilizing the PyArrow backend.
     - Isolate features (X) from the target variable (y) and system metadata for ALL data splits.
     - Build and fit a stateful categorical preprocessor on the training data.
     - Apply the transformation safely to the Validation and Test sets to ensure schema alignment.
@@ -91,10 +101,10 @@ class FeatureTransformation:
             self.ingestion_artifact = ingestion_artifact
 
             os.makedirs(self.config.data_transformation_root_dir, exist_ok=True)
-            logging.info("Training Pipeline: Data Transformation component initialized.")
+            logging.info("Training Pipeline: Feature Transformation component initialized.")
 
         except Exception as e:
-            logging.exception("Failed to initialize Data Transformation component.")
+            logging.exception("Failed to initialize Feature Transformation component.")
             raise CustomException(e, sys) from e
 
     # ==========================================================
@@ -105,10 +115,10 @@ class FeatureTransformation:
         Executes the data transformation pipeline across all temporal splits.
         """
         try:
-            logging.info("Starting Data Transformation (Stateful Schema Enforcement).")
+            logging.info("Starting Feature Transformation (Stateful Schema Enforcement).")
             start_time = time.time()
 
-            # 1. Load data from the ingestion artifacts
+            # 1. Load data from the ingestion artifacts using PyArrow
             train_df = self._load_data(self.ingestion_artifact.train_data_path)
             val_df = self._load_data(self.ingestion_artifact.val_data_path)
             test_df = self._load_data(self.ingestion_artifact.test_data_path)
@@ -156,11 +166,11 @@ class FeatureTransformation:
                 y_test_file_path=self.config.y_test_file_path,
             )
 
-            logging.info("Data Transformation completed successfully: %s", artifact)
+            logging.info("Feature Transformation completed successfully: %s", artifact)
             return artifact
 
         except Exception as e:
-            logging.exception("Data Transformation run failed.")
+            logging.exception("Feature Transformation run failed.")
             raise CustomException(e, sys) from e
 
     # ==========================================================
@@ -168,15 +178,23 @@ class FeatureTransformation:
     # ==========================================================
     def _load_data(self, file_path: str) -> pd.DataFrame:
         """
-        Loads a Parquet file into a Pandas DataFrame using Polars for fast I/O.
+        Loads a Parquet file into a Pandas DataFrame utilizing the PyArrow backend.
+        This provides zero-copy memory transfers, resolving the RAM spike bottleneck
+        previously caused by Polars-to-Pandas default numpy conversions.
         """
         try:
-            return pl.read_parquet(file_path).to_pandas()
+            return pd.read_parquet(
+                file_path, 
+                engine="pyarrow", 
+                dtype_backend="pyarrow"
+            )
         except Exception as e:
-            logging.exception("Failed to load data from %s", file_path)
+            logging.exception("Failed to load data from %s using PyArrow backend.", file_path)
             raise CustomException(e, sys) from e
 
-    def _isolate_features_and_target(self, df: pd.DataFrame, split_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def _isolate_features_and_target(
+        self, df: pd.DataFrame, split_name: str
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Separates features (X) from the target (y) and drops system metadata.
         """
@@ -236,7 +254,7 @@ class FeatureTransformation:
                 }
                 
                 # Identify Categorical Features
-                if physical_type in ["category", "object", "string"]:
+                if physical_type in ["category"] or pd.api.types.is_string_dtype(X[col_name]) or pd.api.types.is_object_dtype(X[col_name]):
                     feature_definition["logical_type"] = "categorical"
                     allowed_vals = sorted([str(val) for val in X[col_name].dropna().unique()])
                     feature_definition["domain"] = {"allowed_values": allowed_vals}
@@ -327,13 +345,16 @@ class FeatureTransformation:
             logging.info("Generating Data Transformation observability metadata.")
 
             input_features = X_train.columns.tolist()
-            categorical_columns = [col for col in input_features if X_train[col].dtype.name == 'category']
+            categorical_columns = [
+                col for col in input_features 
+                if pd.api.types.is_categorical_dtype(X_train[col]) or str(X_train[col].dtype) == "category"
+            ]
             numerical_columns = [col for col in input_features if col not in categorical_columns]
 
             metadata: Dict[str, Any] = {
-                "pipeline_stage": "Training Data Transformation",
+                "pipeline_stage": "Training Feature Transformation",
                 "execution_time_seconds": execution_time,
-                "strategy": "Stateful Schema Enforcement (XGBoost Native Support)",
+                "strategy": "Stateful Schema Enforcement (XGBoost Native Support, PyArrow Backend)",
                 "api_contract": {
                     "total_features": len(input_features),
                     "input_features": input_features,

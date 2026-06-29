@@ -1,12 +1,27 @@
+"""
+Model Registration Module for the Training Pipeline.
+
+This module acts as the final deployment execution layer. If the Evaluator 
+approves the Challenger model, this component vaults the immutable bundle 
+(Model, Schema, strict Requirements, and Metadata) to S3. It then executes a 
+transactional, atomic update of `model_state.json` to enable zero-downtime 
+deployments for downstream inference services.
+
+To prevent deployment dependency bloat, it securely copies a curated, explicitly 
+maintained `requirements.txt` instead of dynamically freezing the entire local 
+system environment.
+"""
+
 import os
 import sys
 import json
 import time
-import subprocess
+import shutil
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-from shared_core import constants
+
+from pipelines.training_pipeline.src import constants
 from pipelines.training_pipeline.src.entity.config_entity import ModelRegistrationConfig
 from pipelines.training_pipeline.src.entity.artifact_entity import (
     FeatureTransformationArtifact,
@@ -27,10 +42,10 @@ class ModelRegistration:
     Responsibilities:
     - Act as the final deployment execution layer (The Vault).
     - Halt execution cleanly if the Challenger model was rejected by the Evaluator.
-    - Generate a fully pinned `requirements.txt` for exact reproducibility.
+    - Package the manually curated `requirements.txt` to guarantee clean deployment images.
     - Merge Trainer and Evaluation metadata into a single, unified `metadata.json`.
-    - Upload the complete immutable bundle (Model, Schema, Requirements, Metadata) to S3.
-    - Execute a transactional, atomic update of `model_state.json` for zero-downtime deployment.
+    - Upload the complete immutable bundle to an isolated S3 run directory.
+    - Execute an atomic update of the global `model_state.json` pointer file.
     """
 
     def __init__(
@@ -51,8 +66,13 @@ class ModelRegistration:
             self.s3_sync = S3Sync()
 
             # Dynamically override legacy config to strictly enforce the new S3 structure
-            self.s3_registry_base_uri = f"s3://{constants.S3_BUCKET_NAME}/model_registry"
-            self.s3_pointer_uri = f"{self.s3_registry_base_uri}/model_state.json"
+            self.s3_registry_base_uri = f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
+            self.s3_models_dir_uri = f"{self.s3_registry_base_uri}/{constants.S3_MODEL_REGISTRY_MODELS_DIR}"
+            self.s3_pointer_uri = (
+                f"{self.s3_registry_base_uri}/"
+                f"{constants.S3_MODEL_REGISTRY_STATE_DIR}/"
+                f"{constants.S3_MODEL_REGISTRY_POINTER_FILE_NAME}"
+            )
 
             # Create a dedicated local staging directory for bundling before upload
             self.staging_dir = os.path.join(self.config.model_registry_root_dir, "staging")
@@ -91,10 +111,12 @@ class ModelRegistration:
                 
                 # Generate unique, timestamped deployment ID to prevent collisions
                 run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-                s3_run_dir_uri = f"{self.s3_registry_base_uri}/{run_id}"
+                
+                # Vault immutable models inside the defined 'models' subdirectory
+                s3_run_dir_uri = f"{self.s3_models_dir_uri}/{run_id}"
                 
                 # 2. Bundle Artifacts Locally (Requirements, Metadata)
-                self._generate_requirements()
+                self._package_requirements()
                 self._merge_metadata(run_id, previous_run_id)
 
                 # 3. Two-Phase Commit to S3
@@ -106,7 +128,7 @@ class ModelRegistration:
                 
                 deployment_status = True
 
-            # 4. Generate local component observability metadata (Not uploaded to registry)
+            # 4. Generate local component observability metadata
             execution_time = round(time.time() - start_time, 2)
             self._generate_component_metadata(
                 deployment_status=deployment_status, 
@@ -132,31 +154,29 @@ class ModelRegistration:
     # ==========================================================
     # ARTIFACT BUNDLING & GENERATION
     # ==========================================================
-    def _generate_requirements(self) -> None:
+    def _package_requirements(self) -> None:
         """
-        Dynamically freezes the current Python environment to ensure absolute reproducibility.
+        Copies the explicitly maintained requirements.txt file from the project root.
+        This prevents the massive dependency bloat caused by dynamically executing `pip freeze`.
         """
         try:
-            logging.info("Generating fully pinned requirements.txt for the deployment bundle.")
-            req_path = os.path.join(self.staging_dir, "requirements.txt")
+            logging.info("Packaging curated project requirements.txt for the deployment bundle.")
             
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "freeze"], 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
+            # Assuming the ModelRegistration is executed from within the project root
+            source_req_path = os.path.abspath("requirements.txt")
+            dest_req_path = os.path.join(self.staging_dir, "requirements.txt")
             
-            with open(req_path, "w") as f:
-                f.write(result.stdout)
+            if not os.path.exists(source_req_path):
+                raise FileNotFoundError(
+                    f"Curated requirements.txt not found at {source_req_path}. "
+                    "Cannot safely deploy model without explicit dependencies."
+                )
                 
-            logging.debug("requirements.txt generated successfully.")
+            shutil.copy2(source_req_path, dest_req_path)
+            logging.debug("requirements.txt safely copied to staging directory.")
             
-        except subprocess.CalledProcessError as e:
-            logging.error("Subprocess failed during pip freeze: %s", e.stderr)
-            raise CustomException(e, sys) from e
         except Exception as e:
-            logging.exception("Failed to generate requirements.txt.")
+            logging.exception("Failed to package requirements.txt.")
             raise CustomException(e, sys) from e
 
     def _merge_metadata(self, run_id: str, previous_run_id: str) -> None:

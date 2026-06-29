@@ -1,3 +1,13 @@
+"""
+Model Evaluation Module for the Training Pipeline.
+
+This module acts as the automated gatekeeper before production deployment.
+It calculates statistical metrics (Log Loss, Brier Score) and translates them into
+business metrics (Expected ROI) using decoupled financial configurations.
+It handles Cold Starts and performs a strict Champion vs. Challenger duel 
+using hysteresis margins to prevent risky deployments of marginally better models.
+"""
+
 import os
 import sys
 import json
@@ -10,7 +20,7 @@ import numpy as np
 import joblib
 from sklearn.metrics import log_loss, brier_score_loss
 
-from shared_core import constants
+from pipelines.training_pipeline.src import constants
 from pipelines.training_pipeline.src.entity.config_entity import ModelEvaluationConfig
 from pipelines.training_pipeline.src.entity.artifact_entity import (
     ModelTrainingArtifact,
@@ -31,10 +41,10 @@ class ModelEvaluation:
     - Act as the strict, automated gatekeeper before production deployment.
     - Calculate global statistical metrics (Log Loss, Brier Score) for the Challenger model.
     - Perform Slice-Based Evaluation (e.g., performance on High-Value customers).
-    - Translate probability outputs into business metrics (Expected ROI).
-    - Retrieve the current Champion model from the updated S3 Registry structure (Cold Start handling).
+    - Translate probability outputs into business metrics (Expected ROI) using dynamic configs.
+    - Retrieve the current Champion model from the S3 Registry (Cold Start handling).
     - Execute Champion vs. Challenger Duel using defined Hysteresis margins.
-    - Generate an immutable, FAANG-grade evaluation report including data provenance and slice definitions.
+    - Generate an immutable, FAANG-grade evaluation report including data provenance.
     """
 
     def __init__(
@@ -53,8 +63,14 @@ class ModelEvaluation:
             self.s3_sync = S3Sync()
 
             # Dynamic S3 URIs aligned with the updated model registry architecture
-            self.s3_registry_base_uri = f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
-            self.s3_pointer_uri = f"{self.s3_registry_base_uri}/model_state.json"
+            self.s3_registry_base_uri = (
+                f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
+            )
+            self.s3_pointer_uri = (
+                f"{self.s3_registry_base_uri}/"
+                f"{constants.S3_MODEL_REGISTRY_STATE_DIR}/"
+                f"{constants.S3_MODEL_REGISTRY_POINTER_FILE_NAME}"
+            )
 
             os.makedirs(self.config.model_evaluation_root_dir, exist_ok=True)
             logging.info("Training Pipeline: Model Evaluation component initialized.")
@@ -74,7 +90,7 @@ class ModelEvaluation:
             logging.info("Starting Model Evaluation Pipeline.")
             start_time = time.time()
 
-            # 1. Load Data and Challenger Model
+            # 1. Load Data and Challenger Model (utilizing PyArrow for memory efficiency)
             X_test, y_test = self._load_data_from_ingestion(
                 self.ingestion_artifact.test_data_path
             )
@@ -88,7 +104,7 @@ class ModelEvaluation:
             challenger_metrics = self._calculate_metrics(challenger_model, X_test, y_test)
             logging.info("Challenger Metrics: %s", challenger_metrics)
 
-            # Phase A: Absolute Threshold Check
+            # Phase A: Absolute Threshold Check (Business Viability)
             if challenger_metrics["eroi"] < self.config.min_eroi_threshold:
                 logging.warning(
                     "Challenger failed absolute minimum EROI threshold (%.4f < %.4f).",
@@ -145,12 +161,14 @@ class ModelEvaluation:
     # ==========================================================
     def _load_data_from_ingestion(self, file_path: str) -> Tuple[pd.DataFrame, np.ndarray]:
         """
-        Loads test dataset and splits X and y, dropping system metadata columns
-        to ensure the feature matrix matches the trained model schema perfectly.
+        Loads test dataset using the PyArrow engine for memory efficiency, splits X and y, 
+        and drops system metadata columns to ensure the feature matrix matches the model schema.
         """
         try:
-            df = pd.read_parquet(file_path)
-            y = df[constants.TARGET_COLUMN].values
+            df = pd.read_parquet(file_path, engine="pyarrow")
+            
+            # Scikit-Learn/XGBoost metrics require standard numpy arrays
+            y = df[constants.TARGET_COLUMN].values.ravel().astype(np.int32)
             
             cols_to_drop = constants.SYSTEM_COLUMNS_TO_DROP + [constants.TARGET_COLUMN]
             cols_to_drop = [c for c in cols_to_drop if c in df.columns]
@@ -178,7 +196,8 @@ class ModelEvaluation:
             # 2. Slice-Based Evaluation (High-Value Cohort)
             # Identifying the top 10% of customers by monetary total
             if "monetary_total" in X.columns:
-                threshold_90th = X["monetary_total"].quantile(0.90)
+                # Use standard Pandas quantile on the PyArrow-backed series
+                threshold_90th = float(X["monetary_total"].quantile(0.90))
                 high_value_mask = X["monetary_total"] >= threshold_90th
                 
                 if high_value_mask.sum() > 0:
@@ -206,15 +225,12 @@ class ModelEvaluation:
     def _calculate_expected_roi(self, y_true: np.ndarray, y_proba: np.ndarray) -> float:
         """
         Simulates a retention campaign to translate model probabilities into financial ROI.
-        Assumptions: 
-        - Cost to target a predicted churner: $10
-        - LTV saved if successful: $500
-        - Intervention success rate: 10%
+        Assumptions are decoupled and loaded dynamically from the centralized constants module.
         """
         try:
-            campaign_cost = 10.0
-            ltv = 500.0
-            save_rate = 0.10
+            campaign_cost = constants.MODEL_EVALUATION_CAMPAIGN_COST
+            ltv = constants.MODEL_EVALUATION_CUSTOMER_LTV
+            save_rate = constants.MODEL_EVALUATION_INTERVENTION_SAVE_RATE
 
             # Expected Value of targeting user i: P(Churn) * LTV * Save_Rate - Cost
             expected_values = (y_proba * ltv * save_rate) - campaign_cost
@@ -231,6 +247,9 @@ class ModelEvaluation:
             actual_churners_targeted = np.sum(y_true[target_mask])
             total_revenue_saved = actual_churners_targeted * save_rate * ltv
             
+            if total_cost == 0:
+                return 0.0
+
             eroi = (total_revenue_saved - total_cost) / total_cost
             return float(eroi)
 
@@ -244,7 +263,7 @@ class ModelEvaluation:
     def _get_production_champion(self) -> Optional[Tuple[Any, Dict[str, Any]]]:
         """
         Checks the S3 Model Registry for a currently deployed Champion model using the
-        new atomic model_state.json pointer. Returns the loaded model and its baseline metrics, 
+        atomic model_state.json pointer. Returns the loaded model and its baseline metrics, 
         or None if Cold Start.
         """
         try:
@@ -345,7 +364,10 @@ class ModelEvaluation:
                 },
                 "business_logic": {
                     "minimum_eroi_threshold": self.config.min_eroi_threshold,
-                    "eroi_hysteresis_margin": self.config.eroi_hysteresis_margin
+                    "eroi_hysteresis_margin": self.config.eroi_hysteresis_margin,
+                    "campaign_cost_assumption": constants.MODEL_EVALUATION_CAMPAIGN_COST,
+                    "customer_ltv_assumption": constants.MODEL_EVALUATION_CUSTOMER_LTV,
+                    "intervention_save_rate_assumption": constants.MODEL_EVALUATION_INTERVENTION_SAVE_RATE
                 },
                 "challenger_metrics": challenger_metrics,
                 "champion_metrics_on_current_test_set": champion_metrics if champion_metrics else "N/A - Cold Start"

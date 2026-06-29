@@ -2,7 +2,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from shared_core import constants
+from pipelines.training_pipeline.src import constants
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 

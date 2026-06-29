@@ -1,3 +1,14 @@
+"""
+Continuous Training (CT) Pipeline Orchestrator.
+
+This module acts as the master execution graph for the Training Pipeline.
+It orchestrates Data Ingestion, Feature Transformation, Model Training, 
+Model Evaluation, and Model Registration in a strict, acyclic sequence.
+It enforces production gatekeeping by halting deployment if the Challenger 
+model fails business evaluation criteria, and optimizes cloud storage by 
+synchronizing only the current run's artifacts to S3.
+"""
+
 import sys
 from typing import Callable, TypeVar
 
@@ -40,27 +51,27 @@ class TrainingPipeline:
     Orchestrates the end-to-end Continuous Training (CT) pipeline.
 
     Pipeline Stages:
-        1. Data Ingestion
-        2. Feature Transformation
-        3. Model Training
-        4. Model Evaluation
-        5. Model Registration (conditional)
-        6. Artifact Synchronization (S3)
+        1. Data Ingestion (Out-Of-Time Splitting)
+        2. Feature Transformation (Stateful Schema Enforcement)
+        3. Model Training (Optuna Tuning & Isotonic Calibration)
+        4. Model Evaluation (Champion vs. Challenger Hysteresis)
+        5. Model Registration (Atomic Deployment - Conditional)
+        6. Artifact Synchronization (Run-specific S3 Sync)
 
     Responsibilities:
-        - Execute pipeline stages sequentially.
-        - Pass artifacts safely between stages.
-        - Enforce deployment gatekeeping based on evaluation results.
-        - Synchronize generated artifacts to AWS S3.
-        - Provide centralized logging and exception handling.
+        - Execute pipeline stages sequentially via functional wrappers.
+        - Pass immutable Dataclass artifacts safely between stages.
+        - Enforce deployment gatekeeping based on business evaluation results.
+        - Synchronize generated artifacts to AWS S3, restricting payload to the current run.
+        - Provide centralized logging and robust exception handling.
     """
 
     def __init__(self) -> None:
         """
-        Initialize pipeline configuration.
+        Initialize the pipeline orchestration context and configuration.
         """
         try:
-            logging.info("Initializing Training Pipeline.")
+            logging.info("Initializing Training Pipeline Context.")
             self.pipeline_config = PipelineConfig()
         except Exception as exc:
             logging.exception("Failed to initialize Training Pipeline.")
@@ -75,14 +86,14 @@ class TrainingPipeline:
         Execute a pipeline phase with standardized logging and exception handling.
 
         Args:
-            phase_name: Name of the pipeline phase.
-            operation: Callable responsible for executing the phase.
+            phase_name: Standardized name of the pipeline phase.
+            operation: Callable responsible for executing the phase component.
 
         Returns:
-            Result returned by the phase execution.
+            Result returned by the phase execution (typically an Artifact Dataclass).
 
         Raises:
-            CustomException: If phase execution fails.
+            CustomException: If the underlying component execution fails.
         """
         try:
             logging.info(">>> Starting %s", phase_name)
@@ -95,12 +106,8 @@ class TrainingPipeline:
 
     def _run_data_ingestion(self) -> DataIngestionArtifact:
         """
-        Execute data ingestion stage.
-
-        Returns:
-            DataIngestionArtifact
+        Execute the data ingestion and bitemporal Out-Of-Time (OOT) splitting stage.
         """
-
         def operation() -> DataIngestionArtifact:
             config = DataIngestionConfig(self.pipeline_config)
             return DataIngestion(config=config).run()
@@ -112,18 +119,10 @@ class TrainingPipeline:
         ingestion_artifact: DataIngestionArtifact,
     ) -> FeatureTransformationArtifact:
         """
-        Execute feature transformation stage.
-
-        Args:
-            ingestion_artifact: Data ingestion artifact.
-
-        Returns:
-            FeatureTransformationArtifact
+        Execute the stateful feature transformation and schema enforcement stage.
         """
-
         def operation() -> FeatureTransformationArtifact:
             config = FeatureTransformationConfig(self.pipeline_config)
-
             return FeatureTransformation(
                 config=config,
                 ingestion_artifact=ingestion_artifact,
@@ -139,18 +138,10 @@ class TrainingPipeline:
         transformation_artifact: FeatureTransformationArtifact,
     ) -> ModelTrainingArtifact:
         """
-        Execute model training stage.
-
-        Args:
-            transformation_artifact: Feature transformation artifact.
-
-        Returns:
-            ModelTrainingArtifact
+        Execute the model training, tuning, and probability calibration stage.
         """
-
         def operation() -> ModelTrainingArtifact:
             config = ModelTrainingConfig(self.pipeline_config)
-
             return ModelTraining(
                 config=config,
                 transformation_artifact=transformation_artifact,
@@ -164,19 +155,10 @@ class TrainingPipeline:
         ingestion_artifact: DataIngestionArtifact,
     ) -> ModelEvaluationArtifact:
         """
-        Execute model evaluation stage.
-
-        Args:
-            trainer_artifact: Model training artifact.
-            ingestion_artifact: Data ingestion artifact.
-
-        Returns:
-            ModelEvaluationArtifact
+        Execute the Champion vs. Challenger evaluation and business ROI translation stage.
         """
-
         def operation() -> ModelEvaluationArtifact:
             config = ModelEvaluationConfig(self.pipeline_config)
-
             return ModelEvaluation(
                 config=config,
                 trainer_artifact=trainer_artifact,
@@ -192,20 +174,10 @@ class TrainingPipeline:
         transformation_artifact: FeatureTransformationArtifact,
     ) -> ModelRegistrationArtifact:
         """
-        Execute model registration stage.
-
-        Args:
-            trainer_artifact: Model training artifact.
-            evaluation_artifact: Model evaluation artifact.
-            transformation_artifact: Feature transformation artifact.
-
-        Returns:
-            ModelRegistrationArtifact
+        Execute the atomic model registration and S3 pointer deployment stage.
         """
-
         def operation() -> ModelRegistrationArtifact:
             config = ModelRegistrationConfig(self.pipeline_config)
-
             return ModelRegistration(
                 config=config,
                 transformation_artifact=transformation_artifact,
@@ -217,18 +189,20 @@ class TrainingPipeline:
 
     def _sync_artifacts(self) -> None:
         """
-        Synchronize pipeline artifacts to AWS S3.
+        Synchronize specific pipeline run artifacts to AWS S3.
+        Restricts synchronization strictly to the current run to prevent 
+        bandwidth and storage bloat from uploading historical local artifacts.
         """
-
         def operation() -> None:
             s3_bucket_url = (
                 f"s3://{constants.S3_BUCKET_NAME}/"
                 f"{constants.ARTIFACT_DIR_NAME}/"
-                f"{constants.TRAINING_PIPELINE_ROOT_DIR_NAME}"
+                f"{constants.TRAINING_PIPELINE_ROOT_DIR_NAME}/"
+                f"{self.pipeline_config.run_id}"
             )
 
             S3Sync().sync_folder_to_s3(
-                folder=constants.ARTIFACT_DIR_NAME,
+                folder=self.pipeline_config.root_dir,
                 aws_bucket_url=s3_bucket_url,
             )
 
@@ -239,13 +213,7 @@ class TrainingPipeline:
         evaluation_artifact: ModelEvaluationArtifact,
     ) -> bool:
         """
-        Check whether the model has been approved for registration.
-
-        Args:
-            evaluation_artifact: Model evaluation artifact.
-
-        Returns:
-            True if approved, otherwise False.
+        Inspect the evaluation gatekeeper boolean to determine deployment eligibility.
         """
         return bool(
             getattr(evaluation_artifact, "approval_status", False)
@@ -253,10 +221,10 @@ class TrainingPipeline:
 
     def run(self) -> None:
         """
-        Execute the complete Continuous Training pipeline.
+        Execute the complete Continuous Training (CT) execution graph.
 
         Raises:
-            CustomException: If a critical pipeline failure occurs.
+            CustomException: If a critical pipeline failure occurs at any stage.
         """
         try:
             logging.info("=" * 60)
@@ -291,9 +259,11 @@ class TrainingPipeline:
             else:
                 logging.warning(
                     "Gate Check Failed: Challenger model rejected. "
-                    "Skipping Model Registration stage."
+                    "Skipping Model Registration stage to protect production."
                 )
 
+            # Artifacts (logs, metrics, local schema blueprints) are synced regardless 
+            # of deployment status to maintain a complete historical audit trail.
             self._sync_artifacts()
 
             logging.info("=" * 60)
