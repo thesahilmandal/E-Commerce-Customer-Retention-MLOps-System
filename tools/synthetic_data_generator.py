@@ -37,8 +37,8 @@ load_dotenv()
 
 # Fallback for custom logging/exceptions if running outside the main project tree
 try:
-    from src.custom_exception import CustomException
-    from src.custom_logging import logging
+    from shared_core.exceptions.custom_exception import CustomException
+    from shared_core.logging.custom_logging import logging
 except ImportError:
     import logging
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s")
