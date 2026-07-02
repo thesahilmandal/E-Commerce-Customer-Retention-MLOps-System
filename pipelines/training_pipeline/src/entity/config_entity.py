@@ -162,6 +162,16 @@ class ModelTrainingConfig:
                 constants.MODEL_TRAINER_METADATA_FILE_NAME,
             )
 
+            # JSON artifacts required for Downstream Monitoring Pipeline
+            self.reference_feature_distributions_file_path: str = os.path.join(
+                self.model_trainer_root_dir,
+                "reference_feature_distributions.json",
+            )
+            self.shap_feature_importance_summary_file_path: str = os.path.join(
+                self.model_trainer_root_dir,
+                "shap_feature_importance_summary.json",
+            )
+
             self.mlflow_experiment_name: str = constants.MODEL_TRAINER_MLFLOW_EXPERIMENT_NAME
 
             os.makedirs(self.model_trainer_root_dir, exist_ok=True)
@@ -192,6 +202,12 @@ class ModelEvaluationConfig:
             self.metadata_file_path: str = os.path.join(
                 self.model_evaluation_root_dir,
                 constants.MODEL_EVALUATION_METADATA_FILE_NAME,
+            )
+
+            # JSON artifact required for Downstream Monitoring Pipeline
+            self.baseline_performance_metrics_file_path: str = os.path.join(
+                self.model_evaluation_root_dir,
+                "baseline_performance_metrics.json",
             )
 
             # Business and Hysteresis Thresholds

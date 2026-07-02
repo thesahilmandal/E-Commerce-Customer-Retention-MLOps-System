@@ -3,9 +3,9 @@ Model Registration Module for the Training Pipeline.
 
 This module acts as the final deployment execution layer. If the Evaluator 
 approves the Challenger model, this component vaults the immutable bundle 
-(Model, Schema, strict Requirements, and Metadata) to S3. It then executes a 
-transactional, atomic update of `model_state.json` to enable zero-downtime 
-deployments for downstream inference services.
+(Model, Schema, JSON Contracts, strict Requirements, and Metadata) to S3. 
+It then executes a transactional, atomic update of `model_state.json` to enable 
+zero-downtime deployments for downstream inference and monitoring services.
 
 To prevent deployment dependency bloat, it securely copies a curated, explicitly 
 maintained `requirements.txt` instead of dynamically freezing the entire local 
@@ -44,7 +44,7 @@ class ModelRegistration:
     - Halt execution cleanly if the Challenger model was rejected by the Evaluator.
     - Package the manually curated `requirements.txt` to guarantee clean deployment images.
     - Merge Trainer and Evaluation metadata into a single, unified `metadata.json`.
-    - Upload the complete immutable bundle to an isolated S3 run directory.
+    - Upload the complete immutable bundle (including JSON contracts for monitoring) to an isolated S3 run directory.
     - Execute an atomic update of the global `model_state.json` pointer file.
     """
 
@@ -246,7 +246,7 @@ class ModelRegistration:
     def _upload_immutable_bundle(self, s3_run_dir_uri: str) -> None:
         """
         PHASE 1 COMMIT: Uploads the compiled model, schema contract, dependencies, 
-        and metadata to an isolated, immutable S3 directory.
+        JSON contracts for monitoring, and metadata to an isolated, immutable S3 directory.
         """
         try:
             logging.info("Initiating Phase 1 Commit: Uploading immutable bundle to %s", s3_run_dir_uri)
@@ -275,6 +275,24 @@ class ModelRegistration:
                 s3_uri=f"{s3_run_dir_uri}/metadata.json"
             )
 
+            # 5. Baseline Performance Metrics
+            self.s3_sync.upload_file(
+                local_path=self.evaluation_artifact.baseline_performance_metrics_file_path,
+                s3_uri=f"{s3_run_dir_uri}/baseline_performance_metrics.json"
+            )
+
+            # 6. Reference Feature Distributions
+            self.s3_sync.upload_file(
+                local_path=self.trainer_artifact.reference_feature_distributions_file_path,
+                s3_uri=f"{s3_run_dir_uri}/reference_feature_distributions.json"
+            )
+
+            # 7. SHAP Feature Importance Summary
+            self.s3_sync.upload_file(
+                local_path=self.trainer_artifact.shap_feature_importance_summary_file_path,
+                s3_uri=f"{s3_run_dir_uri}/shap_feature_importance_summary.json"
+            )
+
             logging.info("Phase 1 Commit successful. Immutable bundle securely vaulted.")
 
         except Exception as e:
@@ -284,7 +302,7 @@ class ModelRegistration:
     def _update_model_state(self, run_id: str, previous_run_id: str, s3_run_dir_uri: str) -> None:
         """
         PHASE 2 COMMIT: Atomic replacement of the global pointer file. 
-        Downstream Inference Services strictly poll this file for the active model.
+        Downstream Inference and Monitoring Services strictly poll this file for the active model.
         """
         try:
             logging.info("Initiating Phase 2 Commit: Overwriting global model_state.json")
@@ -303,7 +321,10 @@ class ModelRegistration:
                 "eroi_baseline": eroi,
                 "s3_bundle_uri": s3_run_dir_uri,
                 "s3_model_path": f"{s3_run_dir_uri}/model.pkl",
-                "s3_schema_path": f"{s3_run_dir_uri}/schema.json"
+                "s3_schema_path": f"{s3_run_dir_uri}/schema.json",
+                "s3_baseline_metrics_path": f"{s3_run_dir_uri}/baseline_performance_metrics.json",
+                "s3_reference_distributions_path": f"{s3_run_dir_uri}/reference_feature_distributions.json",
+                "s3_shap_importance_path": f"{s3_run_dir_uri}/shap_feature_importance_summary.json"
             }
 
             local_state_path = os.path.join(self.staging_dir, "model_state.json")

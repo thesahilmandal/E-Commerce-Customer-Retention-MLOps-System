@@ -59,6 +59,7 @@ class ModelTraining:
       temporal ordering via TimeSeriesSplit to prevent leakage.
     - Assemble a self-contained Scikit-Learn deployment pipeline.
     - Generate global business explainability plots using SHAP.
+    - Extract and save JSON contracts for downstream monitoring (PSI and SHAP baseline).
     - Generate observability metadata including data provenance and environment state.
     """
 
@@ -167,20 +168,28 @@ class ModelTraining:
                 # Log the uncalibrated base estimator for MLflow natively
                 mlflow.xgboost.log_model(base_xgb, "base_xgb_estimator")
 
-                # 6. Business Explainability (SHAP)
+                # 6. Business Explainability (SHAP) & JSON Baseline Extraction
                 self._generate_shap_summary(
                     model=base_xgb,
                     X_val=X_val,
                 )
                 mlflow.log_artifact(self.config.shap_summary_file_path)
+                mlflow.log_artifact(self.config.shap_feature_importance_summary_file_path)
 
-                # 7. Serialize Artifacts
+                # 7. Generate Reference Feature Distributions (for downstream PSI check)
+                self._generate_reference_feature_distributions(
+                    X_train=X_train,
+                    calibrated_model=calibrated_model,
+                )
+                mlflow.log_artifact(self.config.reference_feature_distributions_file_path)
+
+                # 8. Serialize Artifacts
                 joblib.dump(
                     mega_pipeline,
                     self.config.model_file_path,
                 )
 
-                # 8. Generate Metadata
+                # 9. Generate Metadata
                 execution_time = round(time.time() - start_time, 2)
 
                 self._generate_metadata(
@@ -192,11 +201,13 @@ class ModelTraining:
                     num_features=num_features,
                 )
 
-                # 9. Package Artifact
+                # 10. Package Artifact
                 artifact = ModelTrainingArtifact(
                     model_file_path=self.config.model_file_path,
                     shap_summary_file_path=self.config.shap_summary_file_path,
                     metadata_file_path=self.config.metadata_file_path,
+                    reference_feature_distributions_file_path=self.config.reference_feature_distributions_file_path,
+                    shap_feature_importance_summary_file_path=self.config.shap_feature_importance_summary_file_path,
                 )
 
                 logging.info(
@@ -427,12 +438,12 @@ class ModelTraining:
         X_val: pd.DataFrame,
     ) -> None:
         """
-        Generate global feature importance explanations
-        aligned with business intuition.
+        Generate global feature importance explanations and extract the exact
+        SHAP JSON schema contract required by the downstream Monitoring Pipeline.
         """
         try:
             logging.info(
-                "Generating SHAP feature importance summary."
+                "Generating SHAP feature importance summary and downstream JSON artifact."
             )
 
             # Use representative validation sample for speed
@@ -444,9 +455,9 @@ class ModelTraining:
             )
 
             explainer = shap.TreeExplainer(model)
-
             shap_values = explainer.shap_values(X_sample)
 
+            # 1. Generate and save the PNG Summary Plot
             plt.figure(figsize=(10, 8))
 
             shap.summary_plot(
@@ -456,22 +467,146 @@ class ModelTraining:
             )
 
             plt.tight_layout()
-
             plt.savefig(
                 self.config.shap_summary_file_path,
                 dpi=300,
             )
-
             plt.close()
 
-            logging.info(
-                "SHAP summary plot saved successfully."
+            logging.info("SHAP summary plot saved successfully.")
+
+            # 2. Extract and format data for the JSON Artifact
+            mean_abs_shap = np.abs(shap_values).mean(axis=0)
+            feature_importance = []
+            
+            for i, col in enumerate(X_sample.columns):
+                feature_importance.append({
+                    "feature_name": col,
+                    "mean_abs_shap_value": float(mean_abs_shap[i])
+                })
+            
+            # Sort descending by importance
+            feature_importance.sort(key=lambda x: x["mean_abs_shap_value"], reverse=True)
+            
+            # Assign ranks
+            for rank, item in enumerate(feature_importance, start=1):
+                item["rank"] = rank
+
+            # Infer the champion_run_id logically based on directory structure
+            run_id = os.path.basename(os.path.dirname(self.config.model_trainer_root_dir))
+            
+            shap_metadata = {
+                "metadata": {
+                    "champion_run_id": run_id,
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "explainer_type": "TreeExplainer"
+                },
+                "feature_importance": feature_importance
+            }
+
+            write_json_file(
+                file_path=self.config.shap_feature_importance_summary_file_path,
+                content=shap_metadata
             )
+            
+            logging.info("SHAP feature importance JSON artifact saved successfully.")
 
         except Exception as e:
             logging.exception(
-                "Failed to generate SHAP summary."
+                "Failed to generate SHAP summary artifacts."
             )
+            raise CustomException(e, sys) from e
+
+    # ==========================================================
+    # DOWNSTREAM MONITORING CONTRACTS (PSI)
+    # ==========================================================
+    def _generate_reference_feature_distributions(
+        self,
+        X_train: pd.DataFrame,
+        calibrated_model: CalibratedClassifierCV,
+    ) -> None:
+        """
+        Generates the reference distribution bins for all numerical and categorical 
+        features, as well as the predicted probabilities. This is strictly required 
+        by the Monitoring Pipeline to compute Population Stability Index (PSI).
+        """
+        try:
+            logging.info("Generating reference feature distributions for PSI monitoring.")
+            
+            run_id = os.path.basename(os.path.dirname(self.config.model_trainer_root_dir))
+            distributions: Dict[str, Any] = {}
+
+            # Process original training features
+            for col in X_train.columns:
+                series = X_train[col].dropna()
+                
+                # Check for numerics (excluding boolean)
+                if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+                    # Compute unique decile edges
+                    edges = np.unique(np.percentile(series, np.arange(0, 101, 10)))
+                    
+                    if len(edges) > 1:
+                        counts, _ = np.histogram(series, bins=edges)
+                        percentages = (counts / counts.sum()).tolist()
+                        distributions[col] = {
+                            "physical_type": "numerical",
+                            "bin_edges": edges.tolist(),
+                            "expected_percentages": [float(p) for p in percentages]
+                        }
+                    else:
+                        # Fallback for constant features
+                        distributions[col] = {
+                            "physical_type": "numerical",
+                            "bin_edges": [float(edges[0]), float(edges[0]) + 1e-5],
+                            "expected_percentages": [1.0]
+                        }
+                else:
+                    # Treat as categorical
+                    val_counts = series.value_counts(normalize=True)
+                    top_cats = val_counts[val_counts >= 0.01]  # Keep >= 1%
+                    other_pct = val_counts[val_counts < 0.01].sum()
+                    
+                    cats = [str(idx) for idx in top_cats.index.tolist()]
+                    pcts = [float(p) for p in top_cats.tolist()]
+                    
+                    if other_pct > 0:
+                        cats.append("OTHER")
+                        pcts.append(float(other_pct))
+                        
+                    distributions[col] = {
+                        "physical_type": "categorical",
+                        "categories": cats,
+                        "expected_percentages": pcts
+                    }
+
+            # Process predicted probability output space
+            probs = calibrated_model.predict_proba(X_train)[:, 1]
+            prob_edges = np.arange(0.0, 1.1, 0.1)
+            prob_counts, _ = np.histogram(probs, bins=prob_edges)
+            prob_percentages = (prob_counts / prob_counts.sum()).tolist()
+            
+            distributions["predicted_probability"] = {
+                "physical_type": "numerical",
+                "bin_edges": prob_edges.tolist(),
+                "expected_percentages": [float(p) for p in prob_percentages]
+            }
+
+            payload = {
+                "metadata": {
+                    "champion_run_id": run_id,
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat()
+                },
+                "distributions": distributions
+            }
+
+            write_json_file(
+                file_path=self.config.reference_feature_distributions_file_path,
+                content=payload
+            )
+            logging.info("Reference feature distributions JSON artifact saved successfully.")
+
+        except Exception as e:
+            logging.exception("Failed to generate reference feature distributions.")
             raise CustomException(e, sys) from e
 
     # ==========================================================

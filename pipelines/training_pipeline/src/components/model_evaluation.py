@@ -18,7 +18,12 @@ from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 import joblib
-from sklearn.metrics import log_loss, brier_score_loss
+from sklearn.metrics import (
+    log_loss,
+    brier_score_loss,
+    roc_auc_score,
+    average_precision_score,
+)
 
 from pipelines.training_pipeline.src import constants
 from pipelines.training_pipeline.src.entity.config_entity import ModelEvaluationConfig
@@ -45,6 +50,7 @@ class ModelEvaluation:
     - Retrieve the current Champion model from the S3 Registry (Cold Start handling).
     - Execute Champion vs. Challenger Duel using defined Hysteresis margins.
     - Generate an immutable, FAANG-grade evaluation report including data provenance.
+    - Extract JSON baseline metrics contract for the downstream Monitoring Pipeline.
     """
 
     def __init__(
@@ -131,11 +137,16 @@ class ModelEvaluation:
 
                     approval_status = self._duel_models(challenger_metrics, champion_metrics)
 
-            # 4. Generate Reports and Metadata
+            # 4. Generate Reports, Baseline JSON, and Metadata
             self._generate_reports(
                 challenger_metrics=challenger_metrics,
                 champion_metrics=champion_metrics,
                 approval_status=approval_status,
+                test_set_size=test_set_size
+            )
+
+            self._generate_baseline_performance_metrics(
+                challenger_metrics=challenger_metrics,
                 test_set_size=test_set_size
             )
 
@@ -147,6 +158,7 @@ class ModelEvaluation:
                 report_file_path=self.config.report_file_path,
                 metadata_file_path=self.config.metadata_file_path,
                 approval_status=approval_status,
+                baseline_performance_metrics_file_path=self.config.baseline_performance_metrics_file_path,
             )
 
             logging.info("Model Evaluation completed. Approval Status: %s", approval_status)
@@ -192,6 +204,13 @@ class ModelEvaluation:
             # 1. Global Statistical Metrics
             global_log_loss = float(log_loss(y, y_proba))
             global_brier = float(brier_score_loss(y, y_proba))
+            
+            try:
+                global_roc_auc = float(roc_auc_score(y, y_proba))
+                global_pr_auc = float(average_precision_score(y, y_proba))
+            except ValueError:
+                global_roc_auc = 0.5
+                global_pr_auc = 0.0
 
             # 2. Slice-Based Evaluation (High-Value Cohort)
             # Identifying the top 10% of customers by monetary total
@@ -214,6 +233,8 @@ class ModelEvaluation:
             return {
                 "log_loss": global_log_loss,
                 "brier_score": global_brier,
+                "roc_auc": global_roc_auc,
+                "pr_auc": global_pr_auc,
                 "high_value_slice_brier_score": slice_brier,
                 "eroi": eroi,
             }
@@ -377,6 +398,48 @@ class ModelEvaluation:
 
         except Exception as e:
             logging.exception("Failed to generate evaluation report.")
+            raise CustomException(e, sys) from e
+
+    def _generate_baseline_performance_metrics(
+        self, 
+        challenger_metrics: Dict[str, float], 
+        test_set_size: int
+    ) -> None:
+        """
+        Generates the strict JSON contract required by the downstream Monitoring 
+        Pipeline to track performance decay over time.
+        """
+        try:
+            logging.info("Generating Baseline Performance Metrics JSON artifact.")
+            
+            run_id = os.path.basename(os.path.dirname(self.config.model_evaluation_root_dir))
+            
+            payload = {
+                "metadata": {
+                    "champion_run_id": run_id,
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "evaluation_cohort": constants.TEST_SNAPSHOT,
+                    "cohort_size": test_set_size
+                },
+                "global_metrics": {
+                    "brier_score": challenger_metrics["brier_score"],
+                    "log_loss": challenger_metrics["log_loss"],
+                    "roc_auc": challenger_metrics["roc_auc"],
+                    "pr_auc": challenger_metrics["pr_auc"]
+                },
+                "business_metrics": {
+                    "expected_roi_baseline": challenger_metrics["eroi"],
+                    "optimal_probability_threshold": 0.5
+                },
+                "slice_metrics": {
+                    "high_value_customers_brier_score": challenger_metrics["high_value_slice_brier_score"]
+                }
+            }
+
+            write_json_file(file_path=self.config.baseline_performance_metrics_file_path, content=payload)
+            
+        except Exception as e:
+            logging.exception("Failed to generate baseline performance metrics JSON artifact.")
             raise CustomException(e, sys) from e
 
     def _generate_metadata(self, approval_status: bool, execution_time: float, test_set_size: int) -> None:
