@@ -12,7 +12,7 @@ from shared_core.features.shared_feature import SharedFeatureGenerator
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file
-from shared_core.constants import SYSTEM_COLUMNS_TO_DROP
+from pipelines.inference_pipeline.src.constants import SYSTEM_COLUMNS_TO_DROP
 
 
 class FeatureMatrixGeneration:

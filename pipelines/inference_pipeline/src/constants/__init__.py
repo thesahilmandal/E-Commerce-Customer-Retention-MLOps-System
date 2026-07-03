@@ -9,6 +9,7 @@ configuration to be managed through environment variables.
 """
 
 import os
+from typing import List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,6 +52,14 @@ S3_INFERENCE_MLOPS_TELEMETRY_DIR: str = (
 # ==========================================================
 INFERENCE_REPORT_GENERATOR_PROBABILITY_THRESHOLD: float = 0.5
 
+# Target Variable and Metadata Columns (Used to isolate X and y)
+TARGET_COLUMN: str = "target_is_churn"
+SYSTEM_COLUMNS_TO_DROP: List[str] = [
+    "customer_unique_id",
+    "snapshot_date",
+    "ingested_at_utc",
+    "target_180d_ltv"
+]
 
 # ==========================================================
 # INFERENCE PIPELINE COMPONENT CONSTANTS

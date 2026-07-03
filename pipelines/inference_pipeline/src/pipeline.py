@@ -3,7 +3,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from shared_core import constants
+from pipelines.inference_pipeline.src import constants
 from shared_core.cloud.s3_operations import S3Sync
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
@@ -232,11 +232,12 @@ class InferencePipeline:
             s3_path = (
                 f"s3://{constants.S3_BUCKET_NAME}/"
                 f"{constants.ARTIFACT_DIR_NAME}/"
-                f"{constants.INFERENCE_PIPELINE_ROOT_DIR_NAME}"
+                f"{constants.INFERENCE_PIPELINE_ROOT_DIR_NAME}/"
+                f"{self.pipeline_config.run_id}"
             )
 
             S3Sync().sync_folder_to_s3(
-                folder=constants.ARTIFACT_DIR_NAME,
+                folder=self.pipeline_config.root_dir,
                 aws_bucket_url=s3_path,
             )
 

@@ -6,7 +6,7 @@ from typing import Dict, Any
 import pandas as pd
 import joblib
 
-from shared_core import constants
+from pipelines.inference_pipeline.src import constants
 from pipelines.inference_pipeline.src.entity.config_entity import ReportGenerationConfig
 from pipelines.inference_pipeline.src.entity.artifact_entity import (
     InferenceModelLoaderArtifact,
