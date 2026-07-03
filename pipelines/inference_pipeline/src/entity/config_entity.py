@@ -23,7 +23,11 @@ class InferencePipelineConfig:
                 self.run_id,
             )
             os.makedirs(self.root_dir, exist_ok=True)
-            logging.info("InferencePipelineConfig initialized. Run ID: %s", self.run_id)
+
+            logging.info(
+                "InferencePipelineConfig initialized. Run ID: %s",
+                self.run_id,
+            )
 
         except Exception as e:
             logging.exception("Error initializing InferencePipelineConfig.")
@@ -33,11 +37,14 @@ class InferencePipelineConfig:
 class ModelLoadingConfig:
     """
     Configuration for the Inference Pipeline Current Production Model Loader component.
-    Defines S3 URIs for retrieving the active production pointer and local paths 
+    Defines S3 URIs for retrieving the active production pointer and local paths
     to safely stash the downloaded immutable model and schema artifacts.
     """
 
-    def __init__(self, inference_pipeline_config: InferencePipelineConfig) -> None:
+    def __init__(
+        self,
+        inference_pipeline_config: InferencePipelineConfig,
+    ) -> None:
         try:
             # Root directory for this specific component
             self.model_loader_root_dir: str = os.path.join(
@@ -60,10 +67,16 @@ class ModelLoadingConfig:
             )
 
             # S3 Registry Configurations
-            # Aligns precisely with the Phase 2 (Model Registry) atomic state pointer
             self.s3_bucket_name: str = constants.S3_BUCKET_NAME
-            self.s3_registry_base_uri: str = f"s3://{self.s3_bucket_name}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
-            self.s3_pointer_uri: str = f"{self.s3_registry_base_uri}/model_state.json"
+            self.s3_registry_base_uri: str = (
+                f"s3://{self.s3_bucket_name}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
+            )
+            self.s3_pointer_uri: str = (
+                f"{self.s3_registry_base_uri}/"
+                f"{constants.S3_MODEL_REGISTRY_STATE_DIR}/"
+                f"{constants.S3_MODEL_REGISTRY_POINTER_FILE_NAME}"
+            )
+            
 
             # Pre-create the directory structure for safe local I/O
             os.makedirs(self.model_loader_root_dir, exist_ok=True)
@@ -80,47 +93,67 @@ class FeatureMatrixGenerationConfig:
     Defines S3 Data Lake URIs, DuckDB parameters, and local persistence paths
     for the generated inference feature matrix.
     """
-    def __init__(self, inference_pipeline_config: InferencePipelineConfig) -> None:
+
+    def __init__(
+        self,
+        inference_pipeline_config: InferencePipelineConfig,
+    ) -> None:
         try:
             # Component Root Directory
             self.feature_matrix_root_dir: str = os.path.join(
                 inference_pipeline_config.root_dir,
                 constants.INFERENCE_FEATURE_MATRIX_BUILDER_ROOT_DIR_NAME,
             )
-            
+
             # Local Artifact Paths
             self.feature_matrix_file_path: str = os.path.join(
-                self.feature_matrix_root_dir, constants.INFERENCE_FEATURE_MATRIX_FILE_NAME
+                self.feature_matrix_root_dir,
+                constants.INFERENCE_FEATURE_MATRIX_FILE_NAME,
             )
             self.schema_file_path: str = os.path.join(
-                self.feature_matrix_root_dir, constants.INFERENCE_FEATURE_MATRIX_SCHEMA_FILE_NAME
+                self.feature_matrix_root_dir,
+                constants.INFERENCE_FEATURE_MATRIX_SCHEMA_FILE_NAME,
             )
             self.metadata_file_path: str = os.path.join(
-                self.feature_matrix_root_dir, constants.INFERENCE_FEATURE_MATRIX_METADATA_FILE_NAME
+                self.feature_matrix_root_dir,
+                constants.INFERENCE_FEATURE_MATRIX_METADATA_FILE_NAME,
             )
 
             # Upstream S3 Data Lake Location
-            self.s3_data_lake_uri: str = f"s3://{constants.S3_CUSTOMER_DATABASE_NAME}/{constants.S3_DATA_LAKE_BRONZE_DIR_NAME}"
+            self.s3_data_lake_uri: str = (
+                f"s3://{constants.S3_CUSTOMER_DATABASE_NAME}/"
+                f"{constants.S3_DATA_LAKE_BRONZE_DIR_NAME}"
+            )
 
             # Snapshot Logic (Scoring Population Temporal Bound)
             # The pipeline runs on Day T, scoring data up to T-1 (Yesterday).
-            # We set snapshot_date to exactly 00:00:00 of the execution day.
             # The SharedFeatureGenerator uses strictly "< snapshot_date".
             self.snapshot_date: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
             os.makedirs(self.feature_matrix_root_dir, exist_ok=True)
+
             logging.info(
-                "InferenceInputFeatureMatrixBuilderConfig initialized. Snapshot date anchor: %s", 
-                self.snapshot_date
+                "InferenceInputFeatureMatrixBuilderConfig initialized. "
+                "Snapshot date anchor: %s",
+                self.snapshot_date,
             )
 
         except Exception as e:
-            logging.exception("Error initializing InferenceInputFeatureMatrixBuilderConfig.")
+            logging.exception(
+                "Error initializing InferenceInputFeatureMatrixBuilderConfig."
+            )
             raise CustomException(e, sys) from e
 
 
 class InferenceValidationConfig:
-    def __init__(self, inference_pipeline_config: InferencePipelineConfig) -> None:
+    """
+    Configuration for the Inference Validator component.
+    """
+
+    def __init__(
+        self,
+        inference_pipeline_config: InferencePipelineConfig,
+    ) -> None:
         try:
             # Root directory for this specific component
             self.validator_root_dir: str = os.path.join(
@@ -130,15 +163,16 @@ class InferenceValidationConfig:
 
             self.report_file_path: str = os.path.join(
                 self.validator_root_dir,
-                constants.INFERENCE_VALIDATOR_REPORT_FILE_NAME
+                constants.INFERENCE_VALIDATOR_REPORT_FILE_NAME,
             )
             self.metadata_file_path: str = os.path.join(
                 self.validator_root_dir,
-                constants.INFERENCE_VALIDATOR_METADATA_FILE_NAME
+                constants.INFERENCE_VALIDATOR_METADATA_FILE_NAME,
             )
 
             # Pre-create the directory structure for safe local I/O
             os.makedirs(self.validator_root_dir, exist_ok=True)
+
             logging.info("InferenceValidatorConfig initialized.")
 
         except Exception as e:
@@ -149,12 +183,17 @@ class InferenceValidationConfig:
 class ReportGenerationConfig:
     """
     Configuration for the Inference Publisher (Report Generator) component.
-    Defines the probability threshold for churn classification and output 
-    paths for the CSV, Parquet, and JSON artifacts.
+    Defines the probability threshold for churn classification and output
+    paths for the CSV and telemetry artifacts.
     """
-    def __init__(self, inference_pipeline_config: InferencePipelineConfig) -> None:
+
+    def __init__(
+        self,
+        inference_pipeline_config: InferencePipelineConfig,
+    ) -> None:
         try:
             self.run_id: str = inference_pipeline_config.run_id
+
             self.report_generator_root_dir: str = os.path.join(
                 inference_pipeline_config.root_dir,
                 constants.INFERENCE_REPORT_GENERATOR_ROOT_DIR_NAME,
@@ -172,10 +211,13 @@ class ReportGenerationConfig:
                 self.report_generator_root_dir,
                 constants.INFERENCE_REPORT_GENERATOR_METADATA_FILE_NAME,
             )
-            
-            self.probability_threshold: float = constants.INFERENCE_REPORT_GENERATOR_PROBABILITY_THRESHOLD
+
+            self.probability_threshold: float = (
+                constants.INFERENCE_REPORT_GENERATOR_PROBABILITY_THRESHOLD
+            )
 
             os.makedirs(self.report_generator_root_dir, exist_ok=True)
+
             logging.info("InferenceReportGeneratorConfig initialized.")
 
         except Exception as e:
@@ -188,24 +230,37 @@ class ReportPublishingConfig:
     Configuration for the Inference Report Publisher component.
     Defines S3 base URIs for partitioned uploads and local paths for metadata tracking.
     """
-    def __init__(self, inference_pipeline_config: InferencePipelineConfig) -> None:
+
+    def __init__(
+        self,
+        inference_pipeline_config: InferencePipelineConfig,
+    ) -> None:
         try:
             self.run_id: str = inference_pipeline_config.run_id
+
             self.report_publisher_root_dir: str = os.path.join(
                 inference_pipeline_config.root_dir,
                 constants.INFERENCE_REPORT_PUBLISHER_ROOT_DIR_NAME,
             )
-            
+
             self.metadata_file_path: str = os.path.join(
                 self.report_publisher_root_dir,
                 constants.INFERENCE_REPORT_PUBLISHER_METADATA_FILE_NAME,
             )
 
-            # S3 Base URIs (will be dynamically appended with Hive partitions during execution)
-            self.s3_business_reports_base_uri: str = f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_INFERENCE_BUSINESS_REPORTS_DIR}"
-            self.s3_telemetry_logs_base_uri: str = f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_INFERENCE_MLOPS_TELEMETRY_DIR}"
+            # S3 Base URIs (Hive partitions appended during execution)
+            self.s3_business_reports_base_uri: str = (
+                f"s3://{constants.S3_BUCKET_NAME}/"
+                f"{constants.S3_INFERENCE_BUSINESS_REPORTS_DIR}"
+            )
+
+            self.s3_telemetry_logs_base_uri: str = (
+                f"s3://{constants.S3_BUCKET_NAME}/"
+                f"{constants.S3_INFERENCE_MLOPS_TELEMETRY_DIR}"
+            )
 
             os.makedirs(self.report_publisher_root_dir, exist_ok=True)
+
             logging.info("InferenceReportPublisherConfig initialized.")
 
         except Exception as e:

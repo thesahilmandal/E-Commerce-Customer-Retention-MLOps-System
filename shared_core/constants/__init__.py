@@ -1,5 +1,10 @@
+import os
 from pathlib import Path
 from typing import List
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ==========================================================
 # GLOBAL SYSTEM CONSTANTS
@@ -20,7 +25,7 @@ S3_LOGS_DIR_NAME: str = "logs"
 S3_MODEL_REGISTRY_DIR_NAME: str = "model_registry"
 S3_MODEL_REGISTRY_MODELS_DIR: str = "models"
 S3_MODEL_REGISTRY_STATE_DIR: str = "state"
-S3_MODEL_REGISTRY_POINTER_FILE_NAME: str = "production_champion.json"
+S3_MODEL_REGISTRY_POINTER_FILE_NAME: str = os.getenv("S3_MODEL_REGISTRY_POINTER_FILE_NAME", "model_state.json")
 
 # Data Lake S3 Paths
 S3_CUSTOMER_DATABASE_NAME: str = "company-central-data-lake"
