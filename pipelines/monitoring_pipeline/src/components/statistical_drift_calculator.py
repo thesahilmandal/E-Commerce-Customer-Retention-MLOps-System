@@ -26,7 +26,9 @@ class StatisticalDriftCalculator:
     - Identify the top N most influential predictive features using training SHAP baselines.
     - Compute the Population Stability Index (PSI) for the predicted probability distribution.
     - Compute the PSI for the identified top N features to detect covariate shift.
-    - Guarantee robust statistical evaluation by enforcing strict bin edge continuity 
+    - Gracefully handle both numerical and categorical feature distributions based on the
+      physical types recorded during model training.
+    - Guarantee robust statistical evaluation by enforcing strict bin edge / category continuity 
       from the reference baseline and algorithmically mitigating the Zero-Bin Problem.
     """
 
@@ -63,7 +65,13 @@ class StatisticalDriftCalculator:
             # 1. Load Data & Baselines
             telemetry_df = self._load_current_telemetry()
             shap_importances = self._load_json(self.resolver_artifact.shap_importance_file_path)
-            reference_distributions = self._load_json(self.resolver_artifact.reference_distributions_file_path)
+            reference_distributions_raw = self._load_json(self.resolver_artifact.reference_distributions_file_path)
+
+            # Safely extract the distributions dictionary from the nested production JSON schema
+            reference_distributions = reference_distributions_raw.get("distributions", {})
+            if not reference_distributions:
+                logging.warning("Reference baseline JSON missing 'distributions' key. Attempting flat fallback.")
+                reference_distributions = reference_distributions_raw
 
             # 2. Identify Target Features
             top_features = self._extract_top_shap_features(shap_importances)
@@ -170,10 +178,8 @@ class StatisticalDriftCalculator:
         # 1. Prediction Drift (Target = predicted_probability)
         pred_col = "predicted_probability"
         if pred_col in telemetry_df.columns and pred_col in reference_distributions:
-            psi_val = self._compute_numerical_psi(
-                current_series=telemetry_df[pred_col],
-                reference_stats=reference_distributions[pred_col]
-            )
+            ref_stats = reference_distributions[pred_col]
+            psi_val = self._compute_psi_router(telemetry_df[pred_col], ref_stats)
             drift_report["prediction_drift"]["predicted_probability"] = {
                 "psi_score": round(psi_val, 4),
                 "status": "CALCULATED"
@@ -197,10 +203,9 @@ class StatisticalDriftCalculator:
                 drift_report["feature_drift"][feature] = {"psi_score": 0.0, "status": "MISSING_IN_BASELINE"}
                 continue
 
-            psi_val = self._compute_numerical_psi(
-                current_series=telemetry_df[feature],
-                reference_stats=reference_distributions[feature]
-            )
+            ref_stats = reference_distributions[feature]
+            psi_val = self._compute_psi_router(telemetry_df[feature], ref_stats)
+            
             drift_report["feature_drift"][feature] = {
                 "psi_score": round(psi_val, 4),
                 "status": "CALCULATED"
@@ -208,26 +213,40 @@ class StatisticalDriftCalculator:
 
         return drift_report
 
+    def _compute_psi_router(
+        self, 
+        current_series: pd.Series, 
+        reference_stats: Dict[str, Any]
+    ) -> float:
+        """
+        Routes the PSI calculation to the appropriate method based on the physical type 
+        of the feature recorded in the baseline distributions.
+        """
+        physical_type = reference_stats.get("physical_type", "numerical")
+        
+        if physical_type == "categorical":
+            return self._compute_categorical_psi(current_series, reference_stats)
+        else:
+            return self._compute_numerical_psi(current_series, reference_stats)
+
     def _compute_numerical_psi(
         self, 
         current_series: pd.Series, 
         reference_stats: Dict[str, Any]
     ) -> float:
         """
-        First-principles Population Stability Index (PSI) calculation using NumPy.
+        First-principles Population Stability Index (PSI) calculation for numerical features.
         Enforces strict bin consistency with the training reference and applies 
         epsilon clipping to algorithmically mitigate the Zero-Bin problem.
         """
         try:
-            # Extract training baselines
             expected_pct = np.array(reference_stats.get("expected_percentages", []))
             bin_edges = reference_stats.get("bin_edges", [])
             
             if len(expected_pct) == 0 or len(bin_edges) == 0:
-                logging.warning("Reference stats missing bin definitions. Returning 0.0 PSI.")
+                logging.warning("Numerical reference stats missing bin definitions. Returning 0.0 PSI.")
                 return 0.0
 
-            # Guardrail: Empty inference telemetry
             valid_data = current_series.dropna().values
             if len(valid_data) == 0:
                 return 0.0
@@ -249,26 +268,70 @@ class StatisticalDriftCalculator:
             actual_pct = counts / total_count
 
             # The Zero-Bin Problem Mitigation
-            # If a bin has 0 records, it triggers a log(0) -inf exception. 
-            # We apply a minute epsilon to stabilize the calculation while minimizing distortion.
             epsilon = 1e-4
-            
             actual_pct_clipped = np.maximum(actual_pct, epsilon)
             expected_pct_clipped = np.maximum(expected_pct, epsilon)
 
-            # Re-normalize to ensure the distributions still perfectly sum to 1.0 after epsilon addition
+            # Re-normalize
             actual_pct_norm = actual_pct_clipped / np.sum(actual_pct_clipped)
             expected_pct_norm = expected_pct_clipped / np.sum(expected_pct_clipped)
 
-            # PSI = sum( (Actual - Expected) * ln(Actual / Expected) )
+            # PSI Formula
             psi_components = (actual_pct_norm - expected_pct_norm) * np.log(actual_pct_norm / expected_pct_norm)
-            psi_score = np.sum(psi_components)
-
-            return float(psi_score)
+            return float(np.sum(psi_components))
 
         except Exception as e:
-            logging.exception("Mathematical error encountered during PSI calculation.")
-            # Fail-safe: Returning 0.0 prevents pipeline crashes from isolated arithmetic anomalies
+            logging.exception("Mathematical error encountered during numerical PSI calculation.")
+            return 0.0
+
+    def _compute_categorical_psi(
+        self, 
+        current_series: pd.Series, 
+        reference_stats: Dict[str, Any]
+    ) -> float:
+        """
+        First-principles Population Stability Index (PSI) calculation for categorical features.
+        Aligns strictly with the reference categories and applies epsilon clipping.
+        """
+        try:
+            expected_pct = np.array(reference_stats.get("expected_percentages", []))
+            categories = reference_stats.get("categories", [])
+            
+            if len(expected_pct) == 0 or len(categories) == 0:
+                logging.warning("Categorical reference stats missing category definitions. Returning 0.0 PSI.")
+                return 0.0
+
+            valid_data = current_series.dropna()
+            if len(valid_data) == 0:
+                return 0.0
+
+            # Use Pandas Categorical to guarantee alignment with the reference categories sequence.
+            # Any values in current_series not present in `categories` become NaN and are omitted 
+            # from value_counts, protecting against dimension mismatches.
+            cat_series = pd.Categorical(valid_data, categories=categories)
+            counts = cat_series.value_counts(dropna=True).values
+            
+            total_count = np.sum(counts)
+            if total_count == 0:
+                return 0.0
+
+            actual_pct = counts / total_count
+
+            # The Zero-Bin Problem Mitigation
+            epsilon = 1e-4
+            actual_pct_clipped = np.maximum(actual_pct, epsilon)
+            expected_pct_clipped = np.maximum(expected_pct, epsilon)
+
+            # Re-normalize
+            actual_pct_norm = actual_pct_clipped / np.sum(actual_pct_clipped)
+            expected_pct_norm = expected_pct_clipped / np.sum(expected_pct_clipped)
+
+            # PSI Formula
+            psi_components = (actual_pct_norm - expected_pct_norm) * np.log(actual_pct_norm / expected_pct_norm)
+            return float(np.sum(psi_components))
+
+        except Exception as e:
+            logging.exception("Mathematical error encountered during categorical PSI calculation.")
             return 0.0
 
     # ==========================================================

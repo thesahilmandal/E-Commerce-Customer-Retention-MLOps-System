@@ -243,7 +243,7 @@ class MonitoringPipeline:
                 performance_artifact=performance_artifact,
             )
 
-            # self._sync_artifacts_to_s3()
+            self._sync_artifacts_to_s3()
 
             logging.info("=" * 80)
             if rule_engine_artifact.need_update:
