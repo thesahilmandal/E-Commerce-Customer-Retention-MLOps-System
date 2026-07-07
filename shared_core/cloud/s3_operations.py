@@ -20,41 +20,24 @@ class S3Sync:
     Responsibilities:
     - Handle single file uploads/downloads with thread-safe client reuse.
     - Handle directory synchronization (recursive upload/download) via concurrent execution.
-    - Utilize Thread-Local Storage (TLS) combined with pre-resolved frozen credentials
-    to prevent excessive Boto3 session instantiation and disk/network I/O overhead.
+    - Utilize Thread-Local Storage (TLS) to manage boto3 clients safely across concurrent threads.
+    - Rely on native botocore credential chains to ensure automatic STS token rotation.
     - Provide structured logging and standardized exception handling.
     """
 
     def __init__(self, max_workers: int = 10) -> None:
         """
-        Initializes the S3Sync utility and pre-resolves AWS credentials.
+        Initializes the S3Sync utility.
 
         Args:
             max_workers (int): Maximum number of concurrent threads for bulk transfers.
         """
         self.max_workers = max_workers
         self._thread_local = threading.local()
-        
-        try:
-            # Resolve credentials exactly once in the main thread to eliminate I/O bottlenecks
-            session = boto3.Session()
-            credentials = session.get_credentials()
-            
-            if credentials:
-                frozen_creds = credentials.get_frozen_credentials()
-                self._aws_access_key_id = frozen_creds.access_key
-                self._aws_secret_access_key = frozen_creds.secret_key
-                self._aws_session_token = frozen_creds.token
-            else:
-                self._aws_access_key_id = None
-                self._aws_secret_access_key = None
-                self._aws_session_token = None
-                
-            self._region_name = session.region_name
-            logging.info("S3Sync initialized with %s max workers and pre-resolved credentials.", self.max_workers)
-        except Exception as exc:
-            logging.error("Failed to resolve AWS credentials during S3Sync initialization.")
-            raise CustomException(exc, sys) from exc
+        logging.info(
+            "S3Sync initialized with %s max workers. Native Boto3 credential management enabled.",
+            self.max_workers
+        )
 
     # --------------------------------------------------
     # UTILITY METHODS
@@ -62,19 +45,12 @@ class S3Sync:
 
     def _get_client(self) -> Any:
         """
-        Retrieves or creates a thread-local boto3 S3 client using pre-resolved credentials.
-        Eliminates the disk I/O overhead of parsing AWS credentials for every thread
-        in a concurrent execution pool.
+        Retrieves or creates a thread-local boto3 S3 client.
+        Relying on boto3.client() without frozen credentials ensures that 
+        STS tokens automatically rotate in production cloud environments.
         """
         if not hasattr(self._thread_local, "s3_client"):
-            # Pass static credentials to avoid the credential resolution chain
-            self._thread_local.s3_client = boto3.client(
-                "s3",
-                region_name=self._region_name,
-                aws_access_key_id=self._aws_access_key_id,
-                aws_secret_access_key=self._aws_secret_access_key,
-                aws_session_token=self._aws_session_token,
-            )
+            self._thread_local.s3_client = boto3.client("s3")
         return self._thread_local.s3_client
 
     def _parse_s3_uri(self, s3_uri: str) -> Tuple[str, str]:

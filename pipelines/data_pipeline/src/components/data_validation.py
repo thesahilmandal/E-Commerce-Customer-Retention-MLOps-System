@@ -3,24 +3,26 @@ from typing import Dict, Any
 
 import duckdb
 
+from pipelines.data_pipeline.src import constants
 from pipelines.data_pipeline.src.entity.config_entity import DataValidationConfig
 from pipelines.data_pipeline.src.entity.artifact_entity import (
-    DataExtractorArtifact,
-    DataValidationArtifact,
+DataExtractorArtifact,
+DataValidationArtifact,
 )
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file, read_json_file
-
 
 class DataValidation:
     """
     Validator component for validating raw data against predefined schema.
 
+    ```
     Responsibilities:
     - Compare predefined schema with generated schema out-of-core.
     - Perform structural validation (column counts, existence).
     - Perform data quality validation (dtype mapping, categorical bounds, uniqueness) natively via DuckDB.
     - Generate comprehensive validation report and boolean status.
+    - Strictly enforce database memory limits and disk-spilling to prevent Out-Of-Memory (OOM) errors.
     """
 
     # Logical type mappings to prevent brittle strict string comparisons
@@ -35,13 +37,17 @@ class DataValidation:
         self,
         config: DataValidationConfig,
         extractor_artifact: DataExtractorArtifact,
-    ):
+    ) -> None:
         self.config = config
         self.extractor_artifact = extractor_artifact
 
         self.raw_data_dir_path = extractor_artifact.raw_data_dir_path
         self.raw_schema_path = extractor_artifact.raw_data_schema_file_path
         self.predefined_schema_path = self.config.reference_schema_file_path
+
+        # Dedicated temporary directory for DuckDB disk-spilling
+        self.duckdb_temp_dir = os.path.join(self.config.validator_root_dir, "tmp")
+        os.makedirs(self.duckdb_temp_dir, exist_ok=True)
 
         os.makedirs(self.config.validator_root_dir, exist_ok=True)
         logging.info("DataValidation initialized successfully.")
@@ -108,6 +114,18 @@ class DataValidation:
     # ==========================================================
     # UTILITIES
     # ==========================================================
+    def _initialize_duckdb(self) -> duckdb.DuckDBPyConnection:
+        """
+        Initializes an ephemeral, in-memory DuckDB connection with disk-spilling enabled.
+        Prevents Out-Of-Memory (OOM) errors during high-cardinality aggregations.
+        """
+        logging.debug("Initializing DuckDB with temp directory: %s", self.duckdb_temp_dir)
+        con = duckdb.connect(database=":memory:")
+        con.execute(f"PRAGMA threads={constants.COMPUTE_THREADS}")
+        con.execute("PRAGMA memory_limit='8GB'")
+        con.execute(f"PRAGMA temp_directory='{self.duckdb_temp_dir}'")
+        return con
+
     def _get_type_family(self, dtype: str) -> str:
         """
         Maps a concrete DuckDB dtype to its broader logical family.
@@ -175,8 +193,9 @@ class DataValidation:
 
         file_path = self._get_table_file_path(table_name)
         
-        # Connect to DuckDB once per table for out-of-core validations
-        with duckdb.connect(":memory:") as con:
+        # Connect to DuckDB once per table with strictly constrained memory and disk-spill paths
+        con = self._initialize_duckdb()
+        try:
             for col_name, col_rules in expected_columns.items():
                 col_report = self._validate_column(
                     con,
@@ -191,6 +210,9 @@ class DataValidation:
 
                 if not col_report["is_valid"]:
                     table_report["is_valid"] = False
+        finally:
+            con.close()
+            logging.debug("DuckDB connection for table %s closed safely.", table_name)
 
         return table_report
 

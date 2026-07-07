@@ -7,24 +7,25 @@ import duckdb
 
 from pipelines.data_pipeline.src.entity.config_entity import DataTransformationConfig
 from pipelines.data_pipeline.src.entity.artifact_entity import (
-    DataExtractorArtifact,
-    DataTransformationArtifact,
+DataExtractorArtifact,
+DataTransformationArtifact,
 )
 from shared_core.features.shared_feature import SharedFeatureGenerator
 from shared_core.utils.main_utils import write_json_file
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
-
 class DataTransformation:
     """
     Transformer component for generating the Training Master Feature Panel.
 
+    ```
     Responsibilities:
     - Utilize the injected SharedFeatureGenerator to ensure zero training-serving skew.
     - Dynamically compute forward-looking targets (churn) strictly isolated from features.
     - Loop through historical snapshots and compile a unified analytical base table.
-    - Execute out-of-core via DuckDB directly to a single optimized Parquet file.
+    - Execute iteratively out-of-core via DuckDB to bound query optimizer complexity.
+    - Export directly to a single optimized Snappy-compressed Parquet file.
     - Generate observability metadata (class balance, null counts, lineage).
     """
 
@@ -125,8 +126,8 @@ class DataTransformation:
         LEFT JOIN read_parquet('{payments_path}') p 
             ON o.order_id = p.order_id
         WHERE o.order_status IN ('delivered', 'shipped')
-          AND TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) >= TIMESTAMP '{snapshot_date}'
-          AND TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) < TIMESTAMP '{snapshot_date}' + INTERVAL {self.config.target_days} DAY
+        AND TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) >= TIMESTAMP '{snapshot_date}'
+        AND TRY_CAST(o.order_purchase_timestamp AS TIMESTAMP) < TIMESTAMP '{snapshot_date}' + INTERVAL {self.config.target_days} DAY
         GROUP BY cm.customer_unique_id
         """
 
@@ -156,20 +157,31 @@ class DataTransformation:
 
     def _generate_master_panel(self, con: duckdb.DuckDBPyConnection) -> None:
         """
-        Compiles all snapshots into a single UNION ALL query and streams directly to Parquet.
+        Iteratively compiles all snapshots into a single analytical base table and streams directly to Parquet.
+        Avoids monolithic UNION ALL queries to prevent DuckDB AST depth limit exhaustion at scale.
         """
-        logging.info("Orchestrating Master Panel generation across %s snapshots.", len(self.config.snapshots))
+        snapshots = self.config.snapshots
+        if not snapshots:
+            raise ValueError("No snapshots configured for Master Panel generation.")
 
-        snapshot_queries = [
-            self._build_full_snapshot_query(date) for date in self.config.snapshots
-        ]
-        union_query = " UNION ALL ".join(snapshot_queries)
-
+        logging.info("Orchestrating Master Panel generation across %s snapshots.", len(snapshots))
         logging.info("Executing optimized DuckDB execution graph out-of-core...")
 
-        # Zero-Pandas operation: Direct streaming to Snappy-compressed Parquet
+        # 1. Initialize the table with the first snapshot
+        initial_snapshot = snapshots[0]
+        initial_query = self._build_full_snapshot_query(initial_snapshot)
+        con.execute(f"CREATE TABLE master_panel AS SELECT * FROM ({initial_query})")
+        logging.debug("Processed initial snapshot: %s", initial_snapshot)
+
+        # 2. Iteratively append remaining snapshots to bound query optimizer complexity
+        for snapshot_date in snapshots[1:]:
+            append_query = self._build_full_snapshot_query(snapshot_date)
+            con.execute(f"INSERT INTO master_panel SELECT * FROM ({append_query})")
+            logging.debug("Appended snapshot: %s", snapshot_date)
+
+        # 3. Zero-Pandas operation: Direct streaming to Snappy-compressed Parquet
         con.execute(f"""
-            COPY ({union_query}) 
+            COPY master_panel 
             TO '{self.transformed_data_file_path}' 
             (FORMAT PARQUET, COMPRESSION 'snappy');
         """)
