@@ -338,6 +338,9 @@ class ModelTraining:
 
                 predictions = model.predict_proba(X_val)[:, 1]
 
+                # Save the exact iteration where early stopping halted
+                trial.set_user_attr("optimal_n_estimators", model.best_iteration)
+
                 return log_loss(y_val, predictions)
 
             study = optuna.create_study(
@@ -356,7 +359,13 @@ class ModelTraining:
                 study.best_value,
             )
 
-            return study.best_params
+            best_params = study.best_params
+            optimal_trees = study.best_trial.user_attrs.get("optimal_n_estimators")
+            
+            if optimal_trees:
+                best_params["n_estimators"] = optimal_trees
+
+            return best_params
 
         except Exception as e:
             logging.exception(
