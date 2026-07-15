@@ -11,6 +11,7 @@ from pipelines.monitoring_pipeline.src import constants
 from pipelines.monitoring_pipeline.src.entity.config_entity import BaselineAndTelemetryResolverConfig
 from pipelines.monitoring_pipeline.src.entity.artifact_entity import BaselineAndTelemetryResolverArtifact
 from shared_core.cloud.s3_operations import S3Sync
+from shared_core.features.shared_feature import SharedFeatureGenerator
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file
@@ -256,19 +257,23 @@ class BaselineAndTelemetryResolver:
                     "Executing out-of-core lookback join against S3 Data Lake to retrieve matured labels."
                 )
                 
-                s3_lake_pattern = f"{self.config.s3_data_lake_bronze_uri}/**/*.parquet"
+                feature_generator = SharedFeatureGenerator(
+                    data_dir=self.config.s3_data_lake_bronze_uri,
+                    is_partitioned=True
+                )
                 
                 # We extract the ground-truth outcomes as they stand *today* for the customers 
                 # scored *30 days ago*.
+                label_query = feature_generator.get_feature_query(self.config.lookback_date)
+
                 join_query = f"""
                     COPY (
                         SELECT 
                             t.{constants.CUSTOMER_ID_COLUMN}, 
                             l.{constants.TARGET_COLUMN}
                         FROM read_parquet('{self.config.lookback_telemetry_file_path}') AS t
-                        INNER JOIN read_parquet('{s3_lake_pattern}') AS l
+                        INNER JOIN ({label_query}) AS l
                             ON t.{constants.CUSTOMER_ID_COLUMN} = l.{constants.CUSTOMER_ID_COLUMN}
-                        WHERE l.snapshot_date = '{self.config.current_date}'
                     ) TO '{self.config.lookback_labels_file_path}' 
                     (FORMAT PARQUET, COMPRESSION 'snappy');
                 """

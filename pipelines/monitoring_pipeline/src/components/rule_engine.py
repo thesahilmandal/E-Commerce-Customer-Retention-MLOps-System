@@ -222,7 +222,7 @@ class RuleEngine:
                 }
 
             current_brier = performance_report.get("metrics", {}).get("brier_score")
-            baseline_brier = baseline_metrics.get("training_metrics", {}).get("brier_score")
+            baseline_brier = baseline_metrics.get("global_metrics", {}).get("brier_score")
 
             if current_brier is None or baseline_brier is None:
                 raise ValueError("Brier Score missing from performance report or baselines.")
