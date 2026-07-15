@@ -124,7 +124,7 @@ class SyntheticDataGenerator:
         """
         try:
             # Check the orders table as the primary source of truth for completion
-            target_path = f"{self._get_partition_prefix('olist_orders_dataset')}/_SUCCESS"
+            target_path = f"{self._get_partition_prefix('orders')}/_SUCCESS"
             
             if self.s3_fs.exists(target_path):
                 logging.info("Target data partition (%s) already verified on S3. Exiting gracefully.", target_path)
@@ -164,11 +164,6 @@ class SyntheticDataGenerator:
             # Temporal boundaries strictly locked to the target_date
             start_of_target_day = datetime.combine(self.config.target_date, datetime.min.time())
 
-            # Partition keys explicitly defined for Parquet dataset writing
-            year_val = str(self.config.target_date.year)
-            month_val = f"{self.config.target_date.month:02d}"
-            day_val = f"{self.config.target_date.day:02d}"
-
             logging.info("Generating %d orders and simulating purchasing behavior...", self.config.num_orders)
 
             for _ in range(self.config.num_orders):
@@ -202,20 +197,14 @@ class SyntheticDataGenerator:
                     "order_purchase_timestamp": purchase_ts,
                     "order_estimated_delivery_date": est_delivery_ts,
                     "order_delivered_customer_date": act_delivery_ts,
-                    "order_status": order_status,
-                    "year": year_val,
-                    "month": month_val,
-                    "day": day_val
+                    "order_status": order_status
                 })
 
                 # Append Customer Profile mapping
                 customers_data.append({
                     "customer_id": transactional_customer_id,
                     "customer_unique_id": global_customer_id,
-                    "customer_state": random.choice(self.config.states),
-                    "year": year_val,
-                    "month": month_val,
-                    "day": day_val
+                    "customer_state": random.choice(self.config.states)
                 })
 
                 # Append Payments
@@ -224,10 +213,7 @@ class SyntheticDataGenerator:
                 for _ in range(num_payments):
                     payments_data.append({
                         "order_id": order_id,
-                        "payment_value": round(base_value / num_payments, 2),
-                        "year": year_val,
-                        "month": month_val,
-                        "day": day_val
+                        "payment_value": round(base_value / num_payments, 2)
                     })
 
             return pd.DataFrame(orders_data), pd.DataFrame(customers_data), pd.DataFrame(payments_data)
@@ -252,29 +238,27 @@ class SyntheticDataGenerator:
             logging.exception("Failed to perform atomic partition cleanup in S3.")
             raise CustomException(e, sys) from e
 
-    def _write_hive_partitioned_parquet(self, df: pd.DataFrame, table_name: str) -> None:
+    def _write_explicit_parquet(self, df: pd.DataFrame, table_name: str) -> None:
         """
         Cleans existing target partitions atomically in S3, then streams the DataFrame directly 
-        to the S3 bucket using Hive-style partitioning (year=.../month=.../day=...).
+        to the exact S3 prefix using the strict 'data_0.parquet' file naming convention 
+        required by the Hive Partition Generator.
         """
         try:
             self._atomic_partition_cleanup_s3(table_name)
 
-            output_root = f"{self.config.output_base_dir}/{table_name}"
+            partition_prefix = self._get_partition_prefix(table_name)
+            explicit_file_path = f"{partition_prefix}/data_0.parquet"
+            
             table = pa.Table.from_pandas(df)
+            
+            with self.s3_fs.open(explicit_file_path, "wb") as f:
+                pq.write_table(table, f, compression="snappy")
 
-            pq.write_to_dataset(
-                table,
-                root_path=output_root,
-                partition_cols=["year", "month", "day"],
-                compression="snappy",
-                existing_data_behavior="overwrite_or_ignore",
-                filesystem=self.s3_fs
-            )
-            logging.info("Successfully streamed %s partitioned by year/month/day to S3.", table_name)
+            logging.info("Successfully streamed %s to explicit path: %s", table_name, explicit_file_path)
 
         except Exception as e:
-            logging.exception("Failed to write partitioned Parquet dataset to S3 for table: %s", table_name)
+            logging.exception("Failed to write explicit Parquet dataset to S3 for table: %s", table_name)
             raise CustomException(e, sys) from e
 
     def _write_success_flags(self) -> None:
@@ -283,7 +267,7 @@ class SyntheticDataGenerator:
         This signals downstream pipelines (like Inference) that the partition is ready to read.
         """
         try:
-            tables = ["olist_orders_dataset", "olist_customers_dataset", "olist_order_payments_dataset"]
+            tables = ["orders", "customers", "order_payments"]
             for table_name in tables:
                 success_flag_path = f"{self._get_partition_prefix(table_name)}/_SUCCESS"
                 with self.s3_fs.open(success_flag_path, "w") as f:
@@ -309,15 +293,15 @@ class SyntheticDataGenerator:
 
             df_orders, df_customers, df_payments = self._generate_core_entities()
 
-            self._write_hive_partitioned_parquet(df_orders, "olist_orders_dataset")
+            self._write_explicit_parquet(df_orders, "orders")
             del df_orders
             gc.collect()
 
-            self._write_hive_partitioned_parquet(df_customers, "olist_customers_dataset")
+            self._write_explicit_parquet(df_customers, "customers")
             del df_customers
             gc.collect()
 
-            self._write_hive_partitioned_parquet(df_payments, "olist_order_payments_dataset")
+            self._write_explicit_parquet(df_payments, "order_payments")
             del df_payments
             gc.collect()
 

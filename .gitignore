@@ -166,3 +166,4 @@ htmlcov/
 # Local scripts
 secrets.json
 mlflow.db
+temp_hive_workspace/
