@@ -1,340 +1,195 @@
-import os
-from typing import Dict, Any
+"""
+Data Validation Component for the Continual Learning Data Pipeline.
 
-import duckdb
+This module performs out-of-core structural and data quality validations 
+directly against the S3 Bronze Data Lake using DuckDB httpfs.
+It enforces schema integrity and data sanity checks prior to feature 
+materialization without downloading physical files to local disk.
+"""
 
-from pipelines.data_pipeline.src import constants
-from pipelines.data_pipeline.src.entity.config_entity import DataValidationConfig
-from pipelines.data_pipeline.src.entity.artifact_entity import (
-DataExtractorArtifact,
-DataValidationArtifact,
-)
+import sys
+from typing import Dict, List
+
+from pipelines.data_pipeline.src.core.context import PipelineContext
+from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
-from shared_core.utils.main_utils import write_json_file, read_json_file
+
 
 class DataValidation:
     """
-    Validator component for validating raw data against predefined schema.
+    Data Validation Execution Stage.
 
-    ```
     Responsibilities:
-    - Compare predefined schema with generated schema out-of-core.
-    - Perform structural validation (column counts, existence).
-    - Perform data quality validation (dtype mapping, categorical bounds, uniqueness) natively via DuckDB.
-    - Generate comprehensive validation report and boolean status.
-    - Strictly enforce database memory limits and disk-spilling to prevent Out-Of-Memory (OOM) errors.
+    - Execute out-of-core schema validation queries directly against S3 via DuckDB httpfs.
+    - Verify record counts and temporal partition accessibility within the window.
+    - Ensure primary identifiers and critical temporal columns contain no nulls.
+    - Enforce configurable quality gates (fail-fast, strict mode).
     """
 
-    # Logical type mappings to prevent brittle strict string comparisons
-    TYPE_FAMILIES = {
-        "NUMERIC": ["BIGINT", "INTEGER", "DOUBLE", "FLOAT", "HUGEINT", "UBIGINT", "UINTEGER", "TINYINT", "SMALLINT", "DECIMAL"],
-        "STRING": ["VARCHAR", "TEXT", "CHAR", "BLOB"],
-        "DATETIME": ["TIMESTAMP", "DATE", "TIME"],
-        "BOOLEAN": ["BOOLEAN", "BOOL"]
+    # Critical columns per dataset that must pass strict non-null integrity checks
+    CRITICAL_COLUMNS: Dict[str, List[str]] = {
+        "orders": ["order_id", "customer_id", "order_status", "order_purchase_timestamp"],
+        "customers": ["customer_id", "customer_unique_id"],
+        "order_payments": ["order_id", "payment_value"],
     }
 
-    def __init__(
-        self,
-        config: DataValidationConfig,
-        extractor_artifact: DataExtractorArtifact,
-    ) -> None:
-        self.config = config
-        self.extractor_artifact = extractor_artifact
-
-        self.raw_data_dir_path = extractor_artifact.raw_data_dir_path
-        self.raw_schema_path = extractor_artifact.raw_data_schema_file_path
-        self.predefined_schema_path = self.config.reference_schema_file_path
-
-        # Dedicated temporary directory for DuckDB disk-spilling
-        self.duckdb_temp_dir = os.path.join(self.config.validator_root_dir, "tmp")
-        os.makedirs(self.duckdb_temp_dir, exist_ok=True)
-
-        os.makedirs(self.config.validator_root_dir, exist_ok=True)
-        logging.info("DataValidation initialized successfully.")
-
-    # ==========================================================
-    # PUBLIC ENTRYPOINT
-    # ==========================================================
-    def run(self) -> DataValidationArtifact:
+    def __init__(self, context: PipelineContext) -> None:
         """
-        Executes validation pipeline.
+        Initializes the Data Validation component.
 
-        Returns:
-            DataValidationArtifact: Report path and boolean validation status.
+        Args:
+            context (PipelineContext): The injected pipeline execution context 
+                                       containing DuckDB connection and state.
         """
-        logging.info("Starting out-of-core data validation pipeline")
+        self.context = context
+        self.con = self.context.db_con
+        self.bronze_uri = self.context.config.storage.bronze_data_lake.base_uri.rstrip("/")
+        self.validation_cfg = self.context.config.validation
+        self.datasets = self.context.config.storage.bronze_data_lake.datasets
 
-        predefined_schema = read_json_file(self.predefined_schema_path)
-        raw_schema = read_json_file(self.raw_schema_path)
+        logging.info("DataValidation component initialized.")
 
-        report = {
-            "tables": {},
-            "summary": {
-                "total_tables": 0,
-                "passed_tables": 0,
-                "failed_tables": 0,
-                "is_valid": False,
-            },
-        }
+    def _validate_dataset_schema_and_integrity(self, dataset_name: str) -> None:
+        """
+        Validates schema structure, record count, and non-null constraints for a dataset.
 
-        validation_rules = predefined_schema.get("validation_rules", {})
-        tables = predefined_schema.get("tables", {})
+        Args:
+            dataset_name (str): Name of the dataset in the Bronze Data Lake.
 
-        for table_name, table_rules in tables.items():
-            table_report = self._validate_table(
-                table_name,
-                table_rules,
-                raw_schema,
-                validation_rules,
-            )
+        Raises:
+            ValueError: If validation rules are violated.
+        """
+        s3_path = f"{self.bronze_uri}/{dataset_name}/**/*.parquet"
+        start_date = self.context.start_date
+        end_date = self.context.end_date
 
-            report["tables"][table_name] = table_report
-            report["summary"]["total_tables"] += 1
+        logging.debug("Validating dataset '%s' via DuckDB httpfs at path: %s", dataset_name, s3_path)
 
-            if table_report["is_valid"]:
-                report["summary"]["passed_tables"] += 1
-            else:
-                report["summary"]["failed_tables"] += 1
+        # 1. Schema Check: Verify column presence
+        if self.validation_cfg.enable_schema_checks:
+            describe_query = f"""
+                DESCRIBE SELECT * FROM read_parquet('{s3_path}', hive_partitioning=true) LIMIT 1
+            """
+            describe_res = self.con.execute(describe_query).fetchall()
+            existing_columns = {row[0]: row[1] for row in describe_res}
 
-        is_valid = report["summary"]["failed_tables"] == 0
-        report["summary"]["is_valid"] = is_valid
+            logging.debug("Dataset '%s' schema columns: %s", dataset_name, list(existing_columns.keys()))
 
-        write_json_file(self.config.report_file_path, report)
+            required_cols = self.CRITICAL_COLUMNS.get(dataset_name, [])
+            missing_cols = [col for col in required_cols if col not in existing_columns]
+            if missing_cols:
+                raise ValueError(
+                    f"Dataset '{dataset_name}' is missing required critical columns: {missing_cols}"
+                )
 
-        logging.info("Validation completed. is_valid=%s", is_valid)
-        logging.info("Validation report saved at: %s", self.config.report_file_path)
+        # 2. Record Count & Temporal Filtering Validation
+        if dataset_name == "orders":
+            count_query = f"""
+                SELECT COUNT(*) 
+                FROM read_parquet('{s3_path}', hive_partitioning=true)
+                WHERE CAST(year || '-' || month || '-' || day AS DATE) >= CAST('{start_date}' AS DATE)
+                  AND CAST(year || '-' || month || '-' || day AS DATE) <= CAST('{end_date}' AS DATE)
+                  AND TRY_CAST(order_purchase_timestamp AS TIMESTAMP) >= TIMESTAMP '{start_date}'
+                  AND TRY_CAST(order_purchase_timestamp AS TIMESTAMP) < TIMESTAMP '{end_date}'
+            """
+        else:
+            count_query = f"""
+                SELECT COUNT(*) 
+                FROM read_parquet('{s3_path}', hive_partitioning=true)
+                WHERE CAST(year || '-' || month || '-' || day AS DATE) >= CAST('{start_date}' AS DATE)
+                  AND CAST(year || '-' || month || '-' || day AS DATE) <= CAST('{end_date}' AS DATE)
+            """
 
-        artifact = DataValidationArtifact(
-            report_file_path=self.config.report_file_path,
-            is_valid=is_valid,
+        row_count_res = self.con.execute(count_query).fetchone()
+        row_count = row_count_res[0] if row_count_res else 0
+
+        logging.info(
+            "Validation check for dataset '%s' returned %d rows in temporal window [%s to %s).",
+            dataset_name,
+            row_count,
+            start_date,
+            end_date,
         )
 
-        return artifact
-
-    # ==========================================================
-    # UTILITIES
-    # ==========================================================
-    def _initialize_duckdb(self) -> duckdb.DuckDBPyConnection:
-        """
-        Initializes an ephemeral, in-memory DuckDB connection with disk-spilling enabled.
-        Prevents Out-Of-Memory (OOM) errors during high-cardinality aggregations.
-        """
-        logging.debug("Initializing DuckDB with temp directory: %s", self.duckdb_temp_dir)
-        con = duckdb.connect(database=":memory:")
-        con.execute(f"PRAGMA threads={constants.COMPUTE_THREADS}")
-        con.execute("PRAGMA memory_limit='8GB'")
-        con.execute(f"PRAGMA temp_directory='{self.duckdb_temp_dir}'")
-        return con
-
-    def _get_type_family(self, dtype: str) -> str:
-        """
-        Maps a concrete DuckDB dtype to its broader logical family.
-        """
-        dtype_upper = str(dtype).upper()
-        for family, types in self.TYPE_FAMILIES.items():
-            if dtype_upper in types or any(t in dtype_upper for t in types):
-                return family
-        return "UNKNOWN"
-
-    def _get_table_file_path(self, table_name: str) -> str:
-        """
-        Resolves the local file path for a given table name.
-        """
-        parquet_path = os.path.join(self.raw_data_dir_path, f"{table_name}.parquet")
-        if os.path.exists(parquet_path):
-            return parquet_path
-            
-        csv_path = os.path.join(self.raw_data_dir_path, f"{table_name}.csv")
-        if os.path.exists(csv_path):
-            return csv_path
-            
-        return ""
-
-    # ==========================================================
-    # TABLE VALIDATION
-    # ==========================================================
-    def _validate_table(
-        self,
-        table_name: str,
-        table_rules: Dict[str, Any],
-        raw_schema: Dict[str, Any],
-        validation_rules: Dict[str, Any],
-    ) -> Dict[str, Any]:
-
-        table_report = {
-            "exists": True,
-            "num_columns_match": True,
-            "column_validation": {},
-            "is_valid": True,
-            "errors": [],
-        }
-
-        # Check table existence
-        if table_name not in raw_schema:
-            table_report["exists"] = False
-            table_report["is_valid"] = False
-            table_report["errors"].append("Table missing")
-
-            if not validation_rules.get("allow_missing_tables", False):
-                return table_report
-
-        raw_table = raw_schema.get(table_name, {})
-        expected_columns = table_rules.get("columns", {})
-        raw_columns = raw_table.get("columns", [])
-
-        # Column count validation
-        if "num_columns" in table_rules:
-            if len(raw_columns) != table_rules["num_columns"]:
-                table_report["num_columns_match"] = False
-                table_report["is_valid"] = False
-                table_report["errors"].append(
-                    f"Column count mismatch (expected={table_rules['num_columns']}, actual={len(raw_columns)})"
-                )
-
-        file_path = self._get_table_file_path(table_name)
-        
-        # Connect to DuckDB once per table with strictly constrained memory and disk-spill paths
-        con = self._initialize_duckdb()
-        try:
-            for col_name, col_rules in expected_columns.items():
-                col_report = self._validate_column(
-                    con,
-                    table_name,
-                    col_name,
-                    col_rules,
-                    raw_table,
-                    file_path
-                )
-
-                table_report["column_validation"][col_name] = col_report
-
-                if not col_report["is_valid"]:
-                    table_report["is_valid"] = False
-        finally:
-            con.close()
-            logging.debug("DuckDB connection for table %s closed safely.", table_name)
-
-        return table_report
-
-    # ==========================================================
-    # COLUMN VALIDATION
-    # ==========================================================
-    def _validate_column(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        table_name: str,
-        col_name: str,
-        col_rules: Dict[str, Any],
-        raw_table: Dict[str, Any],
-        file_path: str
-    ) -> Dict[str, Any]:
-
-        col_report = {
-            "exists": True,
-            "dtype_match": True,
-            "missing_within_threshold": True,
-            "allowed_values_check": True,
-            "unique_check": True,
-            "is_valid": True,
-            "errors": [],
-        }
-
-        raw_columns = raw_table.get("columns", [])
-        raw_dtypes = raw_table.get("dtypes", {})
-        missing_values = raw_table.get("missing_values", {})
-        total_rows = raw_table.get("num_rows", 1)
-
-        # 1. Column existence
-        if col_name not in raw_columns:
-            col_report["exists"] = False
-            col_report["is_valid"] = False
-            col_report["errors"].append("Column missing")
-            return col_report
-
-        # 2. Flexible Dtype validation
-        expected_dtype = col_rules.get("dtype")
-        actual_dtype = raw_dtypes.get(col_name)
-
-        if expected_dtype and actual_dtype:
-            expected_family = self._get_type_family(expected_dtype)
-            actual_family = self._get_type_family(actual_dtype)
-            
-            if expected_family != actual_family and expected_family != "UNKNOWN":
-                col_report["dtype_match"] = False
-                col_report["is_valid"] = False
-                col_report["errors"].append(
-                    f"dtype mismatch (expected family={expected_family}, actual family={actual_family})"
-                )
-
-        # 3. Missing value validation (Column-Specific Threshold)
-        max_missing_pct = col_rules.get("max_missing_percentage", 0.0)
-        missing_count = missing_values.get(col_name, 0)
-        missing_pct = missing_count / max(total_rows, 1)
-
-        if missing_pct > max_missing_pct:
-            col_report["missing_within_threshold"] = False
-            col_report["is_valid"] = False
-            col_report["errors"].append(
-                f"Missing percentage exceeded ({missing_pct:.4f} > {max_missing_pct})"
+        if row_count == 0:
+            raise ValueError(
+                f"Dataset '{dataset_name}' contains zero records in temporal window [{start_date} to {end_date})."
             )
 
-        # Return early if file_path is missing to avoid SQL errors
-        if not file_path:
-            return col_report
-            
-        reader_func = "read_parquet" if file_path.endswith(".parquet") else "read_csv_auto"
-        query_base = f"{reader_func}('{file_path}')"
+        # 3. Null Checks on Critical Columns
+        if self.validation_cfg.enable_null_checks:
+            required_cols = self.CRITICAL_COLUMNS.get(dataset_name, [])
+            if required_cols:
+                null_selects = [
+                    f"SUM(CASE WHEN \"{col}\" IS NULL THEN 1 ELSE 0 END) AS null_{col}"
+                    for col in required_cols
+                ]
 
-        # 4. Out-of-core Allowed values validation via DuckDB
-        if "allowed_values" in col_rules:
-            try:
-                allowed_tuple = tuple(col_rules["allowed_values"])
-                # If tuple has 1 element, ensure correct SQL syntax
-                if len(allowed_tuple) == 1:
-                    allowed_sql = f"('{allowed_tuple[0]}')"
+                if dataset_name == "orders":
+                    where_clause = f"""
+                        WHERE CAST(year || '-' || month || '-' || day AS DATE) >= CAST('{start_date}' AS DATE)
+                          AND CAST(year || '-' || month || '-' || day AS DATE) <= CAST('{end_date}' AS DATE)
+                          AND TRY_CAST(order_purchase_timestamp AS TIMESTAMP) >= TIMESTAMP '{start_date}'
+                          AND TRY_CAST(order_purchase_timestamp AS TIMESTAMP) < TIMESTAMP '{end_date}'
+                    """
                 else:
-                    allowed_sql = str(allowed_tuple)
-                    
-                query = f"""
-                    SELECT COUNT(*) FROM {query_base}
-                    WHERE "{col_name}" NOT IN {allowed_sql} 
-                    AND "{col_name}" IS NOT NULL
+                    where_clause = f"""
+                        WHERE CAST(year || '-' || month || '-' || day AS DATE) >= CAST('{start_date}' AS DATE)
+                          AND CAST(year || '-' || month || '-' || day AS DATE) <= CAST('{end_date}' AS DATE)
+                    """
+
+                null_query = f"""
+                    SELECT {', '.join(null_selects)}
+                    FROM read_parquet('{s3_path}', hive_partitioning=true)
+                    {where_clause}
                 """
-                invalid_count = con.execute(query).fetchone()[0]
 
-                if invalid_count > 0:
-                    col_report["allowed_values_check"] = False
-                    col_report["is_valid"] = False
-                    col_report["errors"].append(
-                        f"Found {invalid_count} invalid categorical values"
-                    )
+                null_res = self.con.execute(null_query).fetchone()
+                if null_res:
+                    for idx, col in enumerate(required_cols):
+                        null_count = null_res[idx] or 0
+                        if null_count > 0:
+                            msg = (
+                                f"Critical column '{col}' in dataset '{dataset_name}' "
+                                f"contains {null_count} null values in the target temporal window."
+                            )
+                            logging.error(msg)
+                            if self.validation_cfg.strict_mode:
+                                raise ValueError(msg)
 
-            except Exception as exc:
-                logging.error("Failed allowed_values validation for %s: %s", col_name, exc)
-                col_report["allowed_values_check"] = False
-                col_report["is_valid"] = False
-                col_report["errors"].append("SQL Execution failed for allowed_values validation")
+    def run(self) -> None:
+        """
+        Executes the data validation pipeline across all configured datasets.
 
-        # 5. Out-of-core Uniqueness validation via DuckDB
-        if col_rules.get("unique", False):
-            try:
-                query = f"""
-                    SELECT COUNT("{col_name}") - COUNT(DISTINCT "{col_name}") 
-                    FROM {query_base}
-                """
-                duplicates = con.execute(query).fetchone()[0]
+        Raises:
+            CustomException: If data validation fails and fail_fast or strict_mode is enabled.
+        """
+        logging.info(
+            "Starting Data Validation stage for temporal window: [%s to %s)",
+            self.context.start_date,
+            self.context.end_date,
+        )
 
-                if duplicates > 0:
-                    col_report["unique_check"] = False
-                    col_report["is_valid"] = False
-                    col_report["errors"].append(
-                        f"Found {duplicates} duplicate values"
-                    )
+        validation_errors: List[str] = []
 
-            except Exception as exc:
-                logging.error("Failed uniqueness validation for %s: %s", col_name, exc)
-                col_report["unique_check"] = False
-                col_report["is_valid"] = False
-                col_report["errors"].append("SQL Execution failed for uniqueness validation")
+        try:
+            for dataset in self.datasets:
+                try:
+                    self._validate_dataset_schema_and_integrity(dataset.name)
+                except Exception as exc:
+                    error_msg = f"Validation failed for dataset '{dataset.name}': {exc}"
+                    logging.error(error_msg)
+                    validation_errors.append(error_msg)
 
-        return col_report
+                    if self.validation_cfg.fail_fast:
+                        raise ValueError(error_msg) from exc
+
+            if validation_errors:
+                combined_msg = "Data Validation stage failed with the following errors:\n" + "\n".join(validation_errors)
+                raise ValueError(combined_msg)
+
+            logging.info("Data Validation completed successfully. All quality gates passed.")
+
+        except Exception as exc:
+            logging.exception("Data Validation stage failed quality gates.")
+            raise CustomException(exc, sys) from exc

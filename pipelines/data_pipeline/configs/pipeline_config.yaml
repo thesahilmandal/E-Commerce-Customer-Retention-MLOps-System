@@ -1,0 +1,48 @@
+pipeline:
+  name: "continual_learning_data_pipeline"
+  version: "2.0.0"
+
+storage:
+  bronze_data_lake:
+    base_uri: "s3://company-central-data-lake/bronze"
+    datasets:
+      - name: "orders"
+        partition_keys: ["year", "month", "day"]
+      - name: "customers"
+        partition_keys: ["year", "month", "day"]
+      - name: "order_payments"
+        partition_keys: ["year", "month", "day"]
+        
+  feature_store:
+    base_uri: "s3://ml-platform-production/feature_store"
+    artifact_name: "dataset.parquet"
+    metadata_name: "metadata.json"
+    export_format: "parquet"
+    export_compression: "snappy"
+
+compute:
+  engine: "duckdb"
+  hardware:
+    threads: 4
+    memory_limit: "8GB"
+  runtime:
+    temp_directory: "/tmp/data_pipeline_spill"
+    extensions:
+      - "httpfs"
+
+business_logic:
+  target_definition:
+    churn_window_days: 180
+    churn_column_name: "target_is_churn"
+    ltv_column_name: "target_180d_ltv"
+  cohort_definition:
+    minimum_orders: 1
+    active_status_codes: 
+      - "delivered"
+      - "shipped"
+
+validation:
+  enable_schema_checks: true
+  enable_null_checks: true
+  strict_mode: true
+  fail_fast: true
