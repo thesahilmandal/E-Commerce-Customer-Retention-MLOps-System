@@ -1,0 +1,61 @@
+training_pipeline:
+  global:
+    s3_bucket_name: "ml-platform-production"
+    local_artifact_dir: "artifacts/training_pipeline"
+    target_column: "target_is_churn"
+
+  data_processor:
+    val_size: 0.15
+    test_size: 0.15
+    random_state: 42
+    system_columns_to_drop:
+      - "customer_unique_id"
+      - "snapshot_date"
+      - "ingested_at_utc"
+      - "target_180d_ltv"
+
+  model_trainer:
+    mlflow_experiment_name: "Customer_Retention_Optimization"
+    random_state: 42
+    optuna_n_trials: 30
+    early_stopping_rounds: 30
+    calibration_method: "isotonic"
+    calibration_cv_folds: 5
+    hyperparameter_search_space:
+      n_estimators:
+        min: 100
+        max: 800
+        step: 100
+      learning_rate:
+        min: 0.01
+        max: 0.2
+      max_depth:
+        min: 3
+        max: 9
+      min_child_weight:
+        min: 1
+        max: 10
+      subsample:
+        min: 0.6
+        max: 1.0
+      colsample_bytree:
+        min: 0.6
+        max: 1.0
+      gamma:
+        min: 0.0
+        max: 5.0
+
+  model_evaluator:
+    min_eroi_threshold: 0.05
+    eroi_hysteresis_margin: 0.02
+    business_assumptions:
+      campaign_cost: 10.0
+      customer_ltv: 500.0
+      intervention_save_rate: 0.10
+
+  model_registry:
+    s3_registry_base_dir: "model_registry"
+    s3_models_dir: "models"
+    s3_state_dir: "state"
+    s3_pointer_file_name: "model_state.json"
+    deployment_environment: "production"

@@ -1,256 +1,184 @@
 import os
-import sys
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from typing import List, Dict, Any
 
-from pipelines.training_pipeline.src import constants
-from shared_core.exceptions.custom_exception import CustomException
-from shared_core.logging.custom_logging import logging
+from pipelines.training_pipeline.src.core.context import PipelineContext
 
 
-class PipelineConfig:
+@dataclass(frozen=True)
+class DataProcessorConfig:
     """
-    Base configuration for the Training Pipeline.
-    Responsible for creating the unique run ID and root artifact directory.
+    Configuration entity for the Data Processor component.
+    Strictly immutable and holds all parameters and dynamically calculated 
+    local paths required for Out-Of-Core dataset splitting and schema enforcement.
     """
+    training_dataset_s3_uri_path: str
+    target_column: str
+    val_size: float
+    test_size: float
+    random_state: int
+    system_columns_to_drop: List[str]
+    
+    data_processor_dir: str
+    preprocessor_file_path: str
+    schema_file_path: str
+    metadata_file_path: str
+    x_train_file_path: str
+    y_train_file_path: str
+    x_val_file_path: str
+    y_val_file_path: str
+    x_test_file_path: str
+    y_test_file_path: str
 
-    def __init__(self) -> None:
-        try:
-            self.run_id: str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    @classmethod
+    def from_context(cls, context: PipelineContext) -> "DataProcessorConfig":
+        """Factory method to instantiate config dynamically from PipelineContext."""
+        global_config = context.config.get_global_config()
+        dp_config = context.config.get_data_processor_config()
+        base_dir = context.data_processor_dir
 
-            self.root_dir: str = os.path.join(
-                constants.ARTIFACT_DIR_NAME,
-                constants.TRAINING_PIPELINE_ROOT_DIR_NAME,
-                self.run_id,
-            )
-            os.makedirs(self.root_dir, exist_ok=True)
-            logging.info("TrainingPipelineConfig initialized. Run ID: %s", self.run_id)
+        return cls(
+            training_dataset_s3_uri_path=context.training_dataset_s3_uri_path,
+            target_column=global_config["target_column"],
+            val_size=dp_config["val_size"],
+            test_size=dp_config["test_size"],
+            random_state=dp_config["random_state"],
+            system_columns_to_drop=dp_config["system_columns_to_drop"],
+            data_processor_dir=base_dir,
+            preprocessor_file_path=os.path.join(base_dir, "preprocessor.pkl"),
+            schema_file_path=os.path.join(base_dir, "schema.json"),
+            metadata_file_path=os.path.join(base_dir, "metadata.json"),
+            x_train_file_path=os.path.join(base_dir, "x_train.parquet"),
+            y_train_file_path=os.path.join(base_dir, "y_train.parquet"),
+            x_val_file_path=os.path.join(base_dir, "x_val.parquet"),
+            y_val_file_path=os.path.join(base_dir, "y_val.parquet"),
+            x_test_file_path=os.path.join(base_dir, "x_test.parquet"),
+            y_test_file_path=os.path.join(base_dir, "y_test.parquet"),
+        )
 
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineConfig.")
-            raise CustomException(e, sys) from e
 
-
-class DataIngestionConfig:
+@dataclass(frozen=True)
+class ModelTrainerConfig:
     """
-    Configuration for the Training Pipeline Data Ingestion component.
-    Defines S3 source URIs, local artifact paths for the splits, and OOT parameters.
+    Configuration entity for the Model Trainer component.
+    Encapsulates Optuna optimization settings, XGBoost hyperparameter search space, 
+    calibration settings, and output paths for models and explainability artifacts.
     """
+    mlflow_experiment_name: str
+    random_state: int
+    optuna_n_trials: int
+    early_stopping_rounds: int
+    calibration_method: str
+    calibration_cv_folds: int
+    hyperparameter_search_space: Dict[str, Any]
+    
+    model_trainer_dir: str
+    model_file_path: str
+    shap_summary_file_path: str
+    shap_feature_importance_file_path: str
+    reference_feature_distributions_file_path: str
+    metadata_file_path: str
 
-    def __init__(self, training_pipeline_config: PipelineConfig) -> None:
-        try:
-            self.data_ingestion_root_dir: str = os.path.join(
-                training_pipeline_config.root_dir,
-                constants.DATA_INGESTION_ROOT_DIR_NAME,
-            )
-            
-            # Local artifact paths
-            self.train_data_path: str = os.path.join(
-                self.data_ingestion_root_dir, constants.DATA_INGESTION_TRAIN_FILE_NAME
-            )
-            self.val_data_path: str = os.path.join(
-                self.data_ingestion_root_dir, constants.DATA_INGESTION_VAL_FILE_NAME
-            )
-            self.test_data_path: str = os.path.join(
-                self.data_ingestion_root_dir, constants.DATA_INGESTION_TEST_FILE_NAME
-            )
-            self.metadata_file_path: str = os.path.join(
-                self.data_ingestion_root_dir, constants.DATA_INGESTION_METADATA_FILE_NAME
-            )
+    @classmethod
+    def from_context(cls, context: PipelineContext) -> "ModelTrainerConfig":
+        trainer_config = context.config.get_model_trainer_config()
+        base_dir = context.model_trainer_dir
 
-            # S3 remote source for the bitemporal master panel
-            self.s3_master_panel_uri: str = (
-                f"s3://{constants.S3_BUCKET_NAME}/{constants.S3_FEATURE_STORE_DIR_NAME}/"
-                f"{constants.LOADER_MASTER_PANEL_LOCAL_FILE_NAME}"
-            )
-
-            # Splitting configuration based on bitemporal snapshots
-            self.train_snapshots: list = constants.TRAIN_SNAPSHOT
-            self.val_snapshot: str = constants.VAL_SNAPSHOT
-            self.test_snapshot: str = constants.TEST_SNAPSHOT
-
-            os.makedirs(self.data_ingestion_root_dir, exist_ok=True)
-            logging.info("TrainingPipelineDataIngestionConfig initialized.")
-
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineDataIngestionConfig.")
-            raise CustomException(e, sys) from e
+        return cls(
+            mlflow_experiment_name=trainer_config["mlflow_experiment_name"],
+            random_state=trainer_config["random_state"],
+            optuna_n_trials=trainer_config["optuna_n_trials"],
+            early_stopping_rounds=trainer_config["early_stopping_rounds"],
+            calibration_method=trainer_config["calibration_method"],
+            calibration_cv_folds=trainer_config["calibration_cv_folds"],
+            hyperparameter_search_space=trainer_config["hyperparameter_search_space"],
+            model_trainer_dir=base_dir,
+            model_file_path=os.path.join(base_dir, "model.pkl"),
+            shap_summary_file_path=os.path.join(base_dir, "shap_summary.png"),
+            shap_feature_importance_file_path=os.path.join(base_dir, "shap_feature_importance.json"),
+            reference_feature_distributions_file_path=os.path.join(base_dir, "reference_feature_distributions.json"),
+            metadata_file_path=os.path.join(base_dir, "metadata.json"),
+        )
 
 
-class FeatureTransformationConfig:
+@dataclass(frozen=True)
+class ModelEvaluatorConfig:
     """
-    Configuration for the Training Pipeline Data Transformation component.
-    Defines output paths for the preprocessor artifact, transformed datasets, 
-    and schema validation rules.
+    Configuration entity for the Model Evaluator component.
+    Defines business gating thresholds, expected ROI (EROI) hysteresis margins, 
+    business assumption costs, and exact S3 URIs required to fetch the production Champion.
     """
+    min_eroi_threshold: float
+    eroi_hysteresis_margin: float
+    campaign_cost: float
+    customer_ltv: float
+    intervention_save_rate: float
+    
+    s3_pointer_uri: str
+    model_evaluator_dir: str
+    report_file_path: str
+    baseline_performance_metrics_file_path: str
+    metadata_file_path: str
 
-    def __init__(self, training_pipeline_config: PipelineConfig) -> None:
-        try:
-            self.data_transformation_root_dir: str = os.path.join(
-                training_pipeline_config.root_dir,
-                constants.DATA_TRANSFORMATION_ROOT_DIR_NAME,
-            )
-            
-            # Local artifact paths for the serialized preprocessor and metadata
-            self.preprocessor_file_path: str = os.path.join(
-                self.data_transformation_root_dir,
-                constants.DATA_TRANSFORMATION_PREPROCESSOR_FILE_NAME,
-            )
-            self.schema_file_path: str = os.path.join(
-                self.data_transformation_root_dir,
-                constants.DATA_TRANSFORMATION_SCHEMA_FILE_NAME
-            )
-            self.metadata_file_path: str = os.path.join(
-                self.data_transformation_root_dir,
-                constants.DATA_TRANSFORMATION_METADATA_FILE_NAME,
-            )
+    @classmethod
+    def from_context(cls, context: PipelineContext) -> "ModelEvaluatorConfig":
+        global_config = context.config.get_global_config()
+        eval_config = context.config.get_model_evaluator_config()
+        reg_config = context.config.get_model_registry_config()
+        base_dir = context.model_evaluator_dir
 
-            # Transformed Feature Matrix (X) and Target Vector (y) paths
-            self.x_train_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_X_TRAIN_FILE_NAME
-            )
-            self.y_train_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_Y_TRAIN_FILE_NAME
-            )
-            self.x_val_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_X_VAL_FILE_NAME
-            )
-            self.y_val_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_Y_VAL_FILE_NAME
-            )
-            self.x_test_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_X_TEST_FILE_NAME
-            )
-            self.y_test_file_path: str = os.path.join(
-                self.data_transformation_root_dir, constants.DATA_TRANSFORMATION_Y_TEST_FILE_NAME
-            )
+        bucket = global_config["s3_bucket_name"]
+        s3_pointer_uri = (
+            f"s3://{bucket}/{reg_config['s3_registry_base_dir']}/"
+            f"{reg_config['s3_state_dir']}/{reg_config['s3_pointer_file_name']}"
+        )
 
-            # Feature schema and processing constants
-            self.target_column: str = constants.TARGET_COLUMN
-            self.columns_to_drop: list = constants.SYSTEM_COLUMNS_TO_DROP
-
-            os.makedirs(self.data_transformation_root_dir, exist_ok=True)
-            logging.info("TrainingPipelineDataTransformationConfig initialized.")
-
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineDataTransformationConfig.")
-            raise CustomException(e, sys) from e
+        return cls(
+            min_eroi_threshold=eval_config["min_eroi_threshold"],
+            eroi_hysteresis_margin=eval_config["eroi_hysteresis_margin"],
+            campaign_cost=eval_config["business_assumptions"]["campaign_cost"],
+            customer_ltv=eval_config["business_assumptions"]["customer_ltv"],
+            intervention_save_rate=eval_config["business_assumptions"]["intervention_save_rate"],
+            s3_pointer_uri=s3_pointer_uri,
+            model_evaluator_dir=base_dir,
+            report_file_path=os.path.join(base_dir, "evaluation_report.json"),
+            baseline_performance_metrics_file_path=os.path.join(base_dir, "baseline_performance_metrics.json"),
+            metadata_file_path=os.path.join(base_dir, "metadata.json"),
+        )
 
 
-class ModelTrainingConfig:
+@dataclass(frozen=True)
+class ModelRegistryConfig:
     """
-    Configuration for the Training Pipeline Model Trainer component.
-    Defines output paths for the calibrated model, SHAP summaries, and MLflow metadata.
+    Configuration entity for the Model Registry component.
+    Defines the Two-Phase Commit endpoints in AWS S3, including the immutable models vault 
+    and the mutable state pointer.
     """
+    deployment_environment: str
+    s3_models_dir_uri: str
+    s3_pointer_uri: str
+    
+    model_registry_dir: str
+    staging_dir: str
+    metadata_file_path: str
 
-    def __init__(self, training_pipeline_config: PipelineConfig) -> None:
-        try:
-            self.model_trainer_root_dir: str = os.path.join(
-                training_pipeline_config.root_dir,
-                constants.MODEL_TRAINER_ROOT_DIR_NAME,
-            )
-            
-            self.model_file_path: str = os.path.join(
-                self.model_trainer_root_dir,
-                constants.MODEL_TRAINER_MODEL_FILE_NAME,
-            )
-            self.shap_summary_file_path: str = os.path.join(
-                self.model_trainer_root_dir,
-                constants.MODEL_TRAINER_SHAP_SUMMARY_FILE_NAME,
-            )
-            self.metadata_file_path: str = os.path.join(
-                self.model_trainer_root_dir,
-                constants.MODEL_TRAINER_METADATA_FILE_NAME,
-            )
+    @classmethod
+    def from_context(cls, context: PipelineContext) -> "ModelRegistryConfig":
+        global_config = context.config.get_global_config()
+        reg_config = context.config.get_model_registry_config()
+        base_dir = context.model_registry_dir
 
-            # JSON artifacts required for Downstream Monitoring Pipeline
-            self.reference_feature_distributions_file_path: str = os.path.join(
-                self.model_trainer_root_dir,
-                "reference_feature_distributions.json",
-            )
-            self.shap_feature_importance_summary_file_path: str = os.path.join(
-                self.model_trainer_root_dir,
-                "shap_feature_importance_summary.json",
-            )
+        bucket = global_config["s3_bucket_name"]
+        base_registry_uri = f"s3://{bucket}/{reg_config['s3_registry_base_dir']}"
 
-            self.mlflow_experiment_name: str = constants.MODEL_TRAINER_MLFLOW_EXPERIMENT_NAME
+        s3_models_dir_uri = f"{base_registry_uri}/{reg_config['s3_models_dir']}"
+        s3_pointer_uri = f"{base_registry_uri}/{reg_config['s3_state_dir']}/{reg_config['s3_pointer_file_name']}"
 
-            os.makedirs(self.model_trainer_root_dir, exist_ok=True)
-            logging.info("TrainingPipelineModelTrainerConfig initialized.")
-
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineModelTrainerConfig.")
-            raise CustomException(e, sys) from e
-
-
-class ModelEvaluationConfig:
-    """
-    Configuration for the Training Pipeline Model Evaluation component.
-    Defines output paths for the evaluation report and gating thresholds.
-    """
-
-    def __init__(self, training_pipeline_config: PipelineConfig) -> None:
-        try:
-            self.model_evaluation_root_dir: str = os.path.join(
-                training_pipeline_config.root_dir,
-                constants.MODEL_EVALUATION_ROOT_DIR_NAME,
-            )
-            
-            self.report_file_path: str = os.path.join(
-                self.model_evaluation_root_dir,
-                constants.MODEL_EVALUATION_REPORT_FILE_NAME,
-            )
-            self.metadata_file_path: str = os.path.join(
-                self.model_evaluation_root_dir,
-                constants.MODEL_EVALUATION_METADATA_FILE_NAME,
-            )
-
-            # JSON artifact required for Downstream Monitoring Pipeline
-            self.baseline_performance_metrics_file_path: str = os.path.join(
-                self.model_evaluation_root_dir,
-                "baseline_performance_metrics.json",
-            )
-
-            # Business and Hysteresis Thresholds
-            self.min_eroi_threshold: float = constants.MODEL_EVALUATION_MIN_EROI_THRESHOLD
-            self.eroi_hysteresis_margin: float = constants.MODEL_EVALUATION_EROI_HYSTERESIS_MARGIN
-
-            os.makedirs(self.model_evaluation_root_dir, exist_ok=True)
-            logging.info("TrainingPipelineModelEvaluationConfig initialized.")
-
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineModelEvaluationConfig.")
-            raise CustomException(e, sys) from e
-
-
-class ModelRegistrationConfig:
-    """
-    Configuration for the Training Pipeline Model Registry component.
-    Defines S3 URIs for immutable artifact storage and the mutable production pointer.
-    """
-
-    def __init__(self, training_pipeline_config: PipelineConfig) -> None:
-        try:
-            self.model_registry_root_dir: str = os.path.join(
-                training_pipeline_config.root_dir,
-                constants.MODEL_REGISTRY_ROOT_DIR_NAME,
-            )
-            
-            self.metadata_file_path: str = os.path.join(
-                self.model_registry_root_dir,
-                constants.MODEL_REGISTRY_METADATA_FILE_NAME,
-            )
-
-            # S3 Registry Configurations
-            self.s3_bucket_name: str = constants.S3_BUCKET_NAME
-            self.s3_registry_base_uri: str = f"s3://{self.s3_bucket_name}/{constants.S3_MODEL_REGISTRY_DIR_NAME}"
-            
-            self.s3_models_dir_uri: str = f"{self.s3_registry_base_uri}/{constants.S3_MODEL_REGISTRY_MODELS_DIR}"
-            self.s3_state_dir_uri: str = f"{self.s3_registry_base_uri}/{constants.S3_MODEL_REGISTRY_STATE_DIR}"
-            self.s3_pointer_file_uri: str = f"{self.s3_state_dir_uri}/{constants.S3_MODEL_REGISTRY_POINTER_FILE_NAME}"
-
-            os.makedirs(self.model_registry_root_dir, exist_ok=True)
-            logging.info("TrainingPipelineModelRegistryConfig initialized.")
-
-        except Exception as e:
-            logging.exception("Error initializing TrainingPipelineModelRegistryConfig.")
-            raise CustomException(e, sys) from e
+        return cls(
+            deployment_environment=reg_config["deployment_environment"],
+            s3_models_dir_uri=s3_models_dir_uri,
+            s3_pointer_uri=s3_pointer_uri,
+            model_registry_dir=base_dir,
+            staging_dir=os.path.join(base_dir, "staging"),
+            metadata_file_path=os.path.join(base_dir, "metadata.json"),
+        )
