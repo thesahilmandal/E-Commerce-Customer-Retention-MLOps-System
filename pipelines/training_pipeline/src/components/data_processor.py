@@ -197,13 +197,13 @@ class DataProcessor:
             seed_val = self.config.random_state / 1000.0
             self.context.db_conn.execute(f"SELECT setseed({seed_val});")
 
-            # Create a virtual view assigning a random float to every row
-            view_query = f"""
-                CREATE OR REPLACE TEMP VIEW source_view AS 
+            # Create a temporary table assigning a persistent random float to every row
+            table_query = f"""
+                CREATE OR REPLACE TEMP TABLE source_table AS 
                 SELECT *, random() as _split_val 
                 FROM read_parquet('{s3_uri}');
             """
-            self.context.db_conn.execute(view_query)
+            self.context.db_conn.execute(table_query)
 
             # Calculate bounds
             train_bound = 1.0 - self.config.val_size - self.config.test_size
@@ -216,19 +216,19 @@ class DataProcessor:
 
             logging.info("Executing Train split (<= %.2f)", train_bound)
             self.context.db_conn.execute(f"""
-                COPY (SELECT * EXCLUDE(_split_val) FROM source_view WHERE _split_val <= {train_bound}) 
+                COPY (SELECT * EXCLUDE(_split_val) FROM source_table WHERE _split_val <= {train_bound}) 
                 TO '{tmp_train}' (FORMAT PARQUET);
             """)
 
             logging.info("Executing Validation split (> %.2f AND <= %.2f)", train_bound, val_bound)
             self.context.db_conn.execute(f"""
-                COPY (SELECT * EXCLUDE(_split_val) FROM source_view WHERE _split_val > {train_bound} AND _split_val <= {val_bound}) 
+                COPY (SELECT * EXCLUDE(_split_val) FROM source_table WHERE _split_val > {train_bound} AND _split_val <= {val_bound}) 
                 TO '{tmp_val}' (FORMAT PARQUET);
             """)
 
             logging.info("Executing Test split (> %.2f)", val_bound)
             self.context.db_conn.execute(f"""
-                COPY (SELECT * EXCLUDE(_split_val) FROM source_view WHERE _split_val > {val_bound}) 
+                COPY (SELECT * EXCLUDE(_split_val) FROM source_table WHERE _split_val > {val_bound}) 
                 TO '{tmp_test}' (FORMAT PARQUET);
             """)
 
