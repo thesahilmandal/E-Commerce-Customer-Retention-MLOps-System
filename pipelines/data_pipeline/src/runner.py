@@ -8,7 +8,6 @@ executes the stateless pipeline components (Data Discovery, Data Validation,
 Feature Materialization, Metadata Registry) within a single, managed lifecycle.
 """
 
-import argparse
 import os
 import sys
 from datetime import datetime, timezone
@@ -70,7 +69,7 @@ class DataPipeline:
             raise ValueError(error_msg)
 
         logging.info("=" * 70)
-        logging.info("STARTING CONTINUAL LEARNING DATA PIPELINE EXECUTION")
+        logging.info("STARTING DATA PIPELINE EXECUTION")
         logging.info("Run ID: %s | Window: [%s to %s)", run_id, start_date, end_date)
         logging.info("Config Path: %s", config_path)
         logging.info("=" * 70)
@@ -113,7 +112,7 @@ class DataPipeline:
                 registry.run()
 
             logging.info("=" * 70)
-            logging.info("CONTINUAL LEARNING DATA PIPELINE EXECUTED SUCCESSFULLY")
+            logging.info("DATA PIPELINE EXECUTED SUCCESSFULLY")
             logging.info("Run ID: %s", run_id)
             logging.info("=" * 70)
 
@@ -122,51 +121,12 @@ class DataPipeline:
             raise CustomException(exc, sys) from exc
 
 
-def parse_cli_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments for manual or containerized pipeline execution.
-
-    Returns:
-        argparse.Namespace: Parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(
-        description="Run the Continual Learning Production Data Pipeline."
-    )
-    parser.add_argument(
-        "--run_id",
-        type=str,
-        default=None,
-        help="Unique identifier for the pipeline run. Generated if omitted.",
-    )
-    parser.add_argument(
-        "--start_date",
-        type=str,
-        required=True,
-        help="Start date for temporal extraction window (YYYY-MM-DD).",
-    )
-    parser.add_argument(
-        "--end_date",
-        type=str,
-        required=True,
-        help="End date for temporal extraction window (YYYY-MM-DD).",
-    )
-    parser.add_argument(
-        "--config_path",
-        type=str,
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to pipeline_config.yaml.",
-    )
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
     try:
-        args = parse_cli_args()
         DataPipeline.run(
-            run_id=args.run_id,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            config_path=args.config_path,
+            run_id="testing_01",
+            start_date="2016-09-01",
+            end_date="2018-03-01"
         )
     except Exception:
         logging.critical(
