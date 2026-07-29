@@ -1,143 +1,212 @@
 import os
 import sys
+import json
 import time
-from datetime import datetime
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Dict, Any
 
-from pipelines.inference_pipeline.src.core.context import InferenceContext
-from pipelines.inference_pipeline.src.entity.artifact_entity import (
-    ReportGenerationArtifact,
-    ReportPublishingArtifact,
-)
-from pipelines.inference_pipeline.src.entity.config_entity import ReportPublisherConfig
-from shared_core.cloud.s3_operations import S3Sync
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
-from shared_core.utils.main_utils import write_json_file
+from pipelines.inference_pipeline.src.core.context import InferencePipelineContext
+from pipelines.inference_pipeline.src.entity.config_entity import ReportPublisherConfig
+from pipelines.inference_pipeline.src.entity.artifact_entity import (
+    ReportPublisherArtifact,
+    ReportGeneratorArtifact,
+    ModelLoaderArtifact,
+    FeatureMatrixBuilderArtifact,
+    InferenceValidatorArtifact
+)
 
 
 class ReportPublisher:
     """
     Report Publisher Component.
 
-    Responsible for securely publishing the generated business reports, operational 
-    telemetry logs, and centralized metadata manifests to their final Amazon S3 
-    destinations using an idempotent, Hive-partitioned directory structure.
+    Responsibilities:
+    - Validates local existence and integrity of all generated inference outputs.
+    - Aggregates stage-level metadata from all upstream components into a single,
+      comprehensive Master Inference Ledger.
+    - Constructs standard Hive-partitioned S3 target URIs (year/month/day).
+    - Streams the Business Report (CSV), MLOps Telemetry Log (Parquet), and Master 
+      Inference Ledger (JSON) to their designated Cloud Data Lake directories.
+    - Enforces idempotent overwrites for repeatable, scheduled batch execution.
     """
 
-    def __init__(self, config: ReportPublisherConfig, context: InferenceContext) -> None:
+    def __init__(self, context: InferencePipelineContext) -> None:
         """
-        Initializes the ReportPublisher component.
+        Initializes the Report Publisher component.
 
         Args:
-            config (ReportPublisherConfig): Configuration containing target S3 URIs.
-            context (InferenceContext): Centralized pipeline execution context.
+            context (InferencePipelineContext): The centralized execution context.
         """
         try:
-            self.config = config
             self.context = context
-            self.s3_sync = S3Sync()
-
-            os.makedirs(os.path.dirname(self.config.local_metadata_manifest_path), exist_ok=True)
-            logging.info("ReportPublisher component initialized.")
+            self.config = ReportPublisherConfig.from_context(context)
+            logging.info("Inference Pipeline: Report Publisher component initialized.")
         except Exception as e:
-            logging.exception("Failed to initialize ReportPublisher component.")
+            logging.exception("Failed to initialize Report Publisher component.")
             raise CustomException(e, sys) from e
 
-    def run(self, report_artifact: ReportGenerationArtifact) -> ReportPublishingArtifact:
+    def run(
+        self,
+        model_loader_artifact: ModelLoaderArtifact,
+        feature_matrix_artifact: FeatureMatrixBuilderArtifact,
+        validator_artifact: InferenceValidatorArtifact,
+        report_generator_artifact: ReportGeneratorArtifact
+    ) -> ReportPublisherArtifact:
         """
-        Publishes all local artifacts to S3 and generates the final execution manifest.
+        Executes the master ledger consolidation and cloud publication workflow.
 
         Args:
-            report_artifact (ReportGenerationArtifact): Artifacts from the scoring phase.
+            model_loader_artifact (ModelLoaderArtifact): Artifact from ModelLoader.
+            feature_matrix_artifact (FeatureMatrixBuilderArtifact): Artifact from FeatureMatrixBuilder.
+            validator_artifact (InferenceValidatorArtifact): Artifact from InferenceValidator.
+            report_generator_artifact (ReportGeneratorArtifact): Artifact from ReportGenerator.
 
         Returns:
-            ReportPublishingArtifact: S3 URIs of the successfully published artifacts.
+            ReportPublisherArtifact: Artifact containing published cloud URIs and master ledger path.
         """
         try:
-            logging.info("Starting artifact publishing to Amazon S3.")
+            logging.info("Starting Report Publication Sequence.")
             start_time = time.time()
 
-            # 1. Resolve Hive partitions
-            target_date = datetime.strptime(self.config.target_date, "%Y-%m-%d")
-            year_part = f"year={target_date.strftime('%Y')}"
-            month_part = f"month={target_date.strftime('%m')}"
-            day_part = f"day={target_date.strftime('%d')}"
+            # 1. Pre-publication Validation
+            self._validate_local_artifacts(report_generator_artifact=report_generator_artifact)
 
-            # 2. Build Target S3 URIs
-            business_s3_uri = self._build_partitioned_uri(
-                self.config.s3_business_reports_base_uri,
-                year_part, month_part, day_part,
-                "churn_predictions.csv"
-            )
-            
-            telemetry_s3_uri = self._build_partitioned_uri(
-                self.config.s3_telemetry_logs_base_uri,
-                year_part, month_part, day_part,
-                "telemetry.parquet"
-            )
-            
-            manifest_s3_uri = self._build_partitioned_uri(
-                self.config.s3_metadata_manifest_base_uri,
-                year_part, month_part, day_part,
-                f"{self.config.run_id}_metadata.json"
+            # 2. Construct Hive-partitioned S3 Target URIs
+            partition_suffix = self._get_partition_suffix()
+            s3_business_uri = f"{self.config.s3_business_reports_base_uri}/{partition_suffix}/churn_predictions.csv"
+            s3_telemetry_uri = f"{self.config.s3_telemetry_logs_base_uri}/{partition_suffix}/telemetry.parquet"
+            s3_metadata_uri = f"{self.config.s3_metadata_base_uri}/{partition_suffix}/run_{self.config.run_id}_metadata.json"
+
+            # 3. Consolidate Master Inference Ledger
+            master_ledger_path = self._compile_master_inference_ledger(
+                model_loader_artifact=model_loader_artifact,
+                feature_matrix_artifact=feature_matrix_artifact,
+                validator_artifact=validator_artifact,
+                report_generator_artifact=report_generator_artifact,
+                execution_time=round(time.time() - start_time, 2),
+                s3_business_uri=s3_business_uri,
+                s3_telemetry_uri=s3_telemetry_uri
             )
 
-            # 3. Publish Artifacts
-            logging.debug("Publishing business report to: %s", business_s3_uri)
-            self.s3_sync.upload_file(
-                local_path=report_artifact.business_report_file_path,
-                s3_uri=business_s3_uri
+            # 4. Upload Artifacts to Cloud Storage
+            self._publish_artifacts_to_s3(
+                local_csv_path=report_generator_artifact.csv_report_path,
+                s3_csv_uri=s3_business_uri,
+                local_telemetry_path=report_generator_artifact.telemetry_log_path,
+                s3_telemetry_uri=s3_telemetry_uri,
+                local_metadata_path=master_ledger_path,
+                s3_metadata_uri=s3_metadata_uri
             )
 
-            logging.debug("Publishing telemetry log to: %s", telemetry_s3_uri)
-            self.s3_sync.upload_file(
-                local_path=report_artifact.telemetry_log_file_path,
-                s3_uri=telemetry_s3_uri
+            # 5. Package Artifact
+            artifact = ReportPublisherArtifact(
+                published_business_report_uri=s3_business_uri,
+                published_telemetry_log_uri=s3_telemetry_uri,
+                metadata_file_path=master_ledger_path
             )
 
-            # 4. Generate and Publish Metadata Manifest
-            # Record publisher telemetry before writing the manifest
-            execution_time = round(time.time() - start_time, 2)
-            telemetry: Dict[str, Any] = {
-                "published_business_report_uri": business_s3_uri,
-                "published_telemetry_log_uri": telemetry_s3_uri,
-                "published_metadata_manifest_uri": manifest_s3_uri,
-                "execution_time_seconds": execution_time,
-            }
-            self.context.add_metadata("ReportPublisher", telemetry)
-
-            logging.info("Writing centralized metadata manifest to local workspace.")
-            write_json_file(self.config.local_metadata_manifest_path, self.context.metadata_ledger)
-
-            logging.debug("Publishing metadata manifest to: %s", manifest_s3_uri)
-            self.s3_sync.upload_file(
-                local_path=self.config.local_metadata_manifest_path,
-                s3_uri=manifest_s3_uri
-            )
-
-            # 5. Return Output Artifact
-            artifact = ReportPublishingArtifact(
-                published_business_report_uri=business_s3_uri,
-                published_telemetry_log_uri=telemetry_s3_uri,
-                published_metadata_manifest_uri=manifest_s3_uri,
-            )
-
-            logging.info("ReportPublisher execution completed successfully.")
+            logging.info("Report Publication completed successfully: %s", artifact)
             return artifact
 
         except Exception as e:
-            logging.exception("Critical Failure in ReportPublisher component.")
+            logging.exception("Critical Failure inside Report Publisher execution routine.")
             raise CustomException(e, sys) from e
 
-    @staticmethod
-    def _build_partitioned_uri(
-        base_uri: str, year: str, month: str, day: str, filename: str
+    def _validate_local_artifacts(self, report_generator_artifact: ReportGeneratorArtifact) -> None:
+        """Validates that all required upstream local artifacts exist before publishing."""
+        try:
+            if not os.path.exists(report_generator_artifact.csv_report_path):
+                raise FileNotFoundError(f"Business CSV report not found at {report_generator_artifact.csv_report_path}")
+
+            if not os.path.exists(report_generator_artifact.telemetry_log_path):
+                raise FileNotFoundError(f"Telemetry log Parquet not found at {report_generator_artifact.telemetry_log_path}")
+
+            logging.debug("All required local artifact files verified successfully.")
+        except Exception as e:
+            logging.exception("Pre-publication validation failed.")
+            raise CustomException(e, sys) from e
+
+    def _get_partition_suffix(self) -> str:
+        """Generates standard UTC Hive partition path suffix (year=YYYY/month=MM/day=DD)."""
+        now = datetime.now(timezone.utc)
+        return f"year={now.year}/month={now.month:02d}/day={now.day:02d}"
+
+    def _compile_master_inference_ledger(
+        self,
+        model_loader_artifact: ModelLoaderArtifact,
+        feature_matrix_artifact: FeatureMatrixBuilderArtifact,
+        validator_artifact: InferenceValidatorArtifact,
+        report_generator_artifact: ReportGeneratorArtifact,
+        execution_time: float,
+        s3_business_uri: str,
+        s3_telemetry_uri: str
     ) -> str:
         """
-        Safely constructs a Hive-partitioned S3 URI.
+        Aggregates stage-level metadata files from all pipeline stages into a unified Master Ledger.
         """
-        # Strip trailing slashes to prevent double slashes in S3 keys
-        clean_base = base_uri.rstrip("/")
-        uri_parts = [clean_base, year, month, day, filename]
-        return "/".join(uri_parts)
+        try:
+            logging.info("Compiling Master Inference Ledger.")
+
+            stage_metadata = {}
+            metadata_sources = {
+                "model_loader": model_loader_artifact.metadata_file_path,
+                "feature_matrix_builder": feature_matrix_artifact.metadata_file_path,
+                "report_generator": report_generator_artifact.metadata_file_path
+            }
+
+            for stage_name, path in metadata_sources.items():
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        stage_metadata[stage_name] = json.load(f)
+                else:
+                    stage_metadata[stage_name] = {"warning": f"Metadata file not found at {path}"}
+
+            master_ledger: Dict[str, Any] = {
+                "inference_run_id": self.context.run_id,
+                "execution_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "pipeline_status": "SUCCESS",
+                "publisher_execution_time_seconds": execution_time,
+                "published_artifact_lineage": {
+                    "business_report_s3_uri": s3_business_uri,
+                    "telemetry_log_s3_uri": s3_telemetry_uri
+                },
+                "stage_telemetry": stage_metadata
+            }
+
+            with open(self.config.metadata_file_path, "w", encoding="utf-8") as f:
+                json.dump(master_ledger, f, indent=4)
+
+            logging.debug("Master Inference Ledger written locally to: %s", self.config.metadata_file_path)
+            return self.config.metadata_file_path
+
+        except Exception as e:
+            logging.exception("Failed to compile Master Inference Ledger.")
+            raise CustomException(e, sys) from e
+
+    def _publish_artifacts_to_s3(
+        self,
+        local_csv_path: str,
+        s3_csv_uri: str,
+        local_telemetry_path: str,
+        s3_telemetry_uri: str,
+        local_metadata_path: str,
+        s3_metadata_uri: str
+    ) -> None:
+        """Streams all local artifacts to their respective Hive-partitioned S3 paths."""
+        try:
+            logging.info("Uploading Business Report to S3: %s", s3_csv_uri)
+            self.context.s3_sync.upload_file(local_path=local_csv_path, s3_uri=s3_csv_uri)
+
+            logging.info("Uploading MLOps Telemetry Log to S3: %s", s3_telemetry_uri)
+            self.context.s3_sync.upload_file(local_path=local_telemetry_path, s3_uri=s3_telemetry_uri)
+
+            logging.info("Uploading Master Inference Ledger to S3: %s", s3_metadata_uri)
+            self.context.s3_sync.upload_file(local_path=local_metadata_path, s3_uri=s3_metadata_uri)
+
+            logging.info("All inference artifacts successfully published to Cloud Data Lake.")
+
+        except Exception as e:
+            logging.exception("Failed to publish artifacts to S3.")
+            raise CustomException(e, sys) from e

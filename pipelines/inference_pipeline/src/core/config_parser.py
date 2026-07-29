@@ -1,96 +1,88 @@
 import os
 import sys
-from typing import Any, Dict
-
-from dotenv import load_dotenv
+import yaml
+from typing import Any, Dict, List
 
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
 
-class InferenceConfigParser:
+class ConfigParser:
     """
-    Configuration parser for the Inference Pipeline.
-
-    Responsible for securely loading, validating, and centralizing environment variables
-    and static configurations required for batch scoring into a structured dictionary.
+    Parses and validates the global configuration YAML file for the Inference Pipeline.
+    
+    Acts as the centralized configuration provider, replacing hardcoded constants.
+    Reads the configuration file, validates top-level structural integrity, 
+    and exposes distinct sections for downstream entity instantiation.
     """
 
-    def __init__(self) -> None:
+    REQUIRED_TOP_LEVEL_KEYS: List[str] = [
+        "system",
+        "business_logic",
+        "cloud_storage",
+        "components"
+    ]
+
+    def __init__(self, config_path: str = "pipelines/inference_pipeline/config/global_config.yaml") -> None:
         """
-        Initializes the InferenceConfigParser and parses the configuration state.
+        Initializes the ConfigParser and loads the YAML configuration.
+
+        Args:
+            config_path (str): Path to the global_config.yaml file.
         """
         try:
-            load_dotenv()
-            self._config: Dict[str, Any] = self._parse_configuration()
-            logging.debug("Inference Pipeline configuration parsed successfully.")
+            self.config_path = config_path
+            self.config = self._read_and_validate_yaml()
         except Exception as e:
-            logging.exception("Failed to parse Inference Pipeline configuration.")
+            logging.exception("Failed to initialize ConfigParser.")
             raise CustomException(e, sys) from e
 
-    def _parse_configuration(self) -> Dict[str, Any]:
+    def _read_and_validate_yaml(self) -> Dict[str, Any]:
         """
-        Parses and validates all required configuration parameters, explicitly 
-        routing them into logical domains for downstream component injection.
-        
-        Returns:
-            Dict[str, Any]: A strongly typed, validated configuration dictionary.
-        """
-        return {
-            "system": {
-                "artifact_dir": self._get_env("ARTIFACT_DIR_NAME", "artifacts"),
-                "s3_bucket_name": self._get_env("ML_S3_BUCKET_NAME"),
-            },
-            "registry": {
-                "registry_dir": self._get_env("S3_MODEL_REGISTRY_DIR_NAME", "model_registry"),
-                "state_dir": self._get_env("S3_MODEL_REGISTRY_STATE_DIR", "state"),
-                "pointer_file": self._get_env("S3_MODEL_REGISTRY_POINTER_FILE_NAME", "model_state.json"),
-            },
-            "data_lake": {
-                "database_name": self._get_env("S3_CUSTOMER_DATABASE_NAME", "company-central-data-lake"),
-                "bronze_dir": self._get_env("S3_DATA_LAKE_BRONZE_DIR_NAME", "bronze"),
-            },
-            "destinations": {
-                "business_reports_dir": self._get_env("S3_INFERENCE_BUSINESS_REPORTS_DIR", "business_reports"),
-                "mlops_telemetry_dir": self._get_env("S3_INFERENCE_MLOPS_TELEMETRY_DIR", "mlops_telemetry"),
-                "metadata_manifest_dir": self._get_env("S3_INFERENCE_METADATA_DIR", "inference_metadata"),
-            },
-            "business_logic": {
-                "probability_threshold": float(self._get_env("INFERENCE_PROBABILITY_THRESHOLD", "0.5")),
-                "system_columns_to_drop": [
-                    "customer_unique_id",
-                    "snapshot_date",
-                    "ingested_at_utc",
-                    "target_180d_ltv"
-                ],
-            }
-        }
+        Reads the YAML file from disk and validates its structural integrity.
 
-    @staticmethod
-    def _get_env(key: str, default: Any = None) -> str:
-        """
-        Safely retrieves environment variables with validation for required keys.
-        
-        Args:
-            key (str): The environment variable key.
-            default (Any, optional): The default value if the key is not found.
-            
         Returns:
-            str: The resolved environment variable value.
-            
+            Dict[str, Any]: The parsed configuration dictionary.
+        
         Raises:
-            ValueError: If the environment variable is missing and no default is provided.
+            CustomException: If the file is missing, malformed, or missing required keys.
         """
-        value = os.getenv(key, default)
-        if value is None:
-            raise ValueError(
-                f"Configuration Error: Required environment variable '{key}' "
-                "is missing or undefined."
-            )
-        return str(value)
+        try:
+            if not os.path.exists(self.config_path):
+                raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
 
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the parsed and validated configuration dictionary.
-        """
-        return self._config
+            with open(self.config_path, "r", encoding="utf-8") as file:
+                parsed_config = yaml.safe_load(file)
+
+            if not isinstance(parsed_config, dict):
+                raise ValueError("Parsed YAML configuration must be a dictionary.")
+
+            # Validate top-level keys to ensure contract integrity
+            missing_keys = [
+                key for key in self.REQUIRED_TOP_LEVEL_KEYS if key not in parsed_config
+            ]
+            if missing_keys:
+                raise KeyError(f"Configuration is missing required top-level keys: {missing_keys}")
+
+            logging.debug("Configuration successfully loaded and structurally validated from %s", self.config_path)
+            return parsed_config
+
+        except Exception as e:
+            logging.exception("Error parsing or validating YAML configuration.")
+            raise CustomException(e, sys) from e
+
+    def get_system_config(self) -> Dict[str, Any]:
+        """Retrieves the system-level configuration."""
+        return self.config.get("system", {})
+
+    def get_business_logic_config(self) -> Dict[str, Any]:
+        """Retrieves the business logic configuration, including thresholds and target definitions."""
+        return self.config.get("business_logic", {})
+
+    def get_cloud_storage_config(self) -> Dict[str, Any]:
+        """Retrieves the S3 and Data Lake routing configuration."""
+        return self.config.get("cloud_storage", {})
+
+    def get_components_config(self) -> Dict[str, Any]:
+        """Retrieves the specific configuration blocks for pipeline components."""
+        return self.config.get("components", {})

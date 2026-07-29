@@ -1,137 +1,170 @@
-import json
 import os
 import sys
+import json
 import time
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Dict, Any
 
-from pipelines.inference_pipeline.src.core.context import InferenceContext
-from pipelines.inference_pipeline.src.entity.artifact_entity import FeatureMatrixBuilderArtifact
-from pipelines.inference_pipeline.src.entity.config_entity import FeatureMatrixBuilderConfig
 from shared_core.exceptions.custom_exception import CustomException
-from shared_core.features.shared_feature import SharedFeatureGenerator
 from shared_core.logging.custom_logging import logging
-from shared_core.utils.main_utils import write_json_file
+from shared_core.features.shared_feature import SharedFeatureGenerator
+from pipelines.inference_pipeline.src.core.context import InferencePipelineContext
+from pipelines.inference_pipeline.src.entity.config_entity import FeatureMatrixBuilderConfig
+from pipelines.inference_pipeline.src.entity.artifact_entity import FeatureMatrixBuilderArtifact
 
 
 class FeatureMatrixBuilder:
     """
     Feature Matrix Builder Component.
 
-    Executes out-of-core feature engineering via DuckDB against the S3 customer data lake,
-    materializing the point-in-time feature matrix for batch inference while generating
-    the runtime schema contract artifact.
+    Responsibilities:
+    - Guarantees Zero Training-Serving Skew by invoking the exact same 
+      `SharedFeatureGenerator` used during the Training Pipeline.
+    - Generates the deterministic point-in-time feature SQL query.
+    - Executes out-of-core SQL transformations via the injected DuckDB engine.
+    - Materializes the inference feature matrix locally as a Parquet file.
+    - Extracts the structural data schema for downstream validation.
     """
 
-    def __init__(self, config: FeatureMatrixBuilderConfig, context: InferenceContext) -> None:
+    def __init__(self, context: InferencePipelineContext) -> None:
         """
-        Initializes the FeatureMatrixBuilder component.
+        Initializes the Feature Matrix Builder component.
 
         Args:
-            config (FeatureMatrixBuilderConfig): Configuration specifying lake URIs and target paths.
-            context (InferenceContext): Centralized pipeline execution context.
+            context (InferencePipelineContext): The centralized execution context providing
+                                                configurations and the DuckDB engine.
         """
         try:
-            self.config = config
             self.context = context
-
-            os.makedirs(os.path.dirname(self.config.local_feature_matrix_file_path), exist_ok=True)
-            os.makedirs(os.path.dirname(self.config.local_schema_file_path), exist_ok=True)
-
-            logging.info("FeatureMatrixBuilder component initialized.")
+            self.config = FeatureMatrixBuilderConfig.from_context(context)
+            logging.info("Inference Pipeline: Feature Matrix Builder component initialized.")
         except Exception as e:
-            logging.exception("Failed to initialize FeatureMatrixBuilder component.")
+            logging.exception("Failed to initialize Feature Matrix Builder component.")
             raise CustomException(e, sys) from e
 
     def run(self) -> FeatureMatrixBuilderArtifact:
         """
-        Executes out-of-core feature generation, materializes feature matrix Parquet,
-        and produces the structural schema contract JSON file.
+        Executes the out-of-core feature engineering workflow.
 
         Returns:
-            FeatureMatrixBuilderArtifact: Output artifact containing paths to matrix and schema files.
+            FeatureMatrixBuilderArtifact: Dataclass containing paths to the materialized 
+                                          feature matrix, schema, and metadata.
         """
         try:
-            logging.info("Starting feature matrix generation for snapshot date: %s", self.config.snapshot_date)
+            logging.info("Starting Feature Matrix Construction Sequence.")
             start_time = time.time()
 
-            # 1. Instantiate shared feature generator to eliminate training-serving skew
-            feature_generator = SharedFeatureGenerator(
-                bronze_base_uri=self.config.s3_data_lake_uri
-            )
+            # 1. Build Feature Matrix using Shared Core Engine
+            self._generate_feature_matrix()
 
-            # 2. Build exact point-in-time feature query
-            # We use a broad historical start_date to capture all customer history up to the execution snapshot
-            feature_query = feature_generator.get_feature_query(
-                start_date="2000-01-01",
-                end_date=self.config.snapshot_date,
-            )
+            # 2. Extract Structural Schema
+            self._extract_schema()
 
-            # 3. Materialize feature matrix directly to local Parquet via DuckDB
-            logging.info("Executing DuckDB feature extraction query and exporting to Parquet.")
-            copy_sql = f"""
-                COPY (
-                    {feature_query}
-                ) TO '{self.config.local_feature_matrix_file_path}' (FORMAT PARQUET);
-            """
-            self.context.db_connection.execute(copy_sql)
-
-            # 4. Extract physical schema and total row count from materialized Parquet
-            describe_results = self.context.db_connection.execute(
-                f"DESCRIBE SELECT * FROM '{self.config.local_feature_matrix_file_path}'"
-            ).fetchall()
-
-            total_rows = self.context.db_connection.execute(
-                f"SELECT COUNT(*) FROM '{self.config.local_feature_matrix_file_path}'"
-            ).fetchone()[0]
-
-            features_list: List[Dict[str, Any]] = []
-            for idx, row in enumerate(describe_results):
-                col_name = str(row[0])
-                col_type = str(row[1]).lower()
-                is_nullable = str(row[2]).upper() == "YES" if len(row) > 2 else True
-
-                features_list.append(
-                    {
-                        "name": col_name,
-                        "index": idx,
-                        "physical_type": col_type,
-                        "is_nullable": is_nullable,
-                    }
-                )
-
-            # 5. Construct and save schema contract JSON
-            schema_contract = {
-                "features": features_list,
-                "scoring_population": {
-                    "total_eligible_customers": total_rows,
-                    "snapshot_date": self.config.snapshot_date,
-                },
-            }
-            write_json_file(file_path=self.config.local_schema_file_path, content=schema_contract)
-            logging.info("Runtime schema contract saved to: %s", self.config.local_schema_file_path)
-
-            # 6. Record execution metadata in central context ledger
+            # 3. Generate Operational Metadata
             execution_time = round(time.time() - start_time, 2)
-            telemetry: Dict[str, Any] = {
-                "snapshot_date": self.config.snapshot_date,
-                "total_rows_generated": total_rows,
-                "total_features_generated": len(features_list),
-                "local_matrix_path": self.config.local_feature_matrix_file_path,
-                "local_schema_path": self.config.local_schema_file_path,
-                "execution_time_seconds": execution_time,
-            }
-            self.context.add_metadata("FeatureMatrixBuilder", telemetry)
+            self._generate_metadata(execution_time=execution_time)
 
-            # 7. Package and return artifact
+            # 4. Package Artifact
             artifact = FeatureMatrixBuilderArtifact(
-                feature_matrix_file_path=self.config.local_feature_matrix_file_path,
-                schema_file_path=self.config.local_schema_file_path,
-                snapshot_date=self.config.snapshot_date,
+                feature_matrix_file_path=self.config.feature_matrix_file_path,
+                schema_file_path=self.config.schema_file_path,
+                metadata_file_path=self.config.metadata_file_path,
+                snapshot_date=self.config.snapshot_date
             )
 
-            logging.info("FeatureMatrixBuilder execution completed successfully.")
+            logging.info("Feature Matrix Construction completed successfully: %s", artifact)
             return artifact
 
         except Exception as e:
-            logging.exception("Critical Failure in FeatureMatrixBuilder component.")
+            logging.exception("Critical Failure inside Feature Matrix Builder execution routine.")
+            raise CustomException(e, sys) from e
+
+    def _generate_feature_matrix(self) -> None:
+        """
+        Invokes the domain-driven SharedFeatureGenerator to obtain the zero-skew feature query, 
+        and executes it via DuckDB to materialize the results directly to Parquet.
+        """
+        try:
+            logging.info("Executing SharedFeatureGenerator for temporal snapshot: %s", self.config.snapshot_date)
+            
+            # The SharedFeatureGenerator manages S3 logical paths internally using the Bronze Data Lake URI
+            feature_generator = SharedFeatureGenerator(bronze_base_uri=self.config.s3_data_lake_uri)
+            
+            # Define the historical window. A static early date ensures we capture the lifetime behavior 
+            # of all active customers up to the snapshot date. DuckDB's partition pushdown handles pruning.
+            historical_start_date = "2015-01-01"
+            
+            # Retrieve the deterministic SQL string
+            query = feature_generator.get_feature_query(
+                start_date=historical_start_date,
+                end_date=self.config.snapshot_date
+            )
+            
+            # Execute and materialize out-of-core
+            copy_query = f"COPY ({query}) TO '{self.config.feature_matrix_file_path}' (FORMAT PARQUET);"
+            self.context.duckdb_con.execute(copy_query)
+            
+            logging.debug("Feature matrix successfully materialized at: %s", self.config.feature_matrix_file_path)
+
+        except Exception as e:
+            logging.exception("Failed to generate out-of-core feature matrix.")
+            raise CustomException(e, sys) from e
+
+    def _extract_schema(self) -> None:
+        """
+        Queries the materialized Parquet file via DuckDB to extract its exact 
+        structural schema, ensuring precise compatibility validation downstream.
+        """
+        try:
+            logging.info("Extracting structural schema from materialized feature matrix.")
+            
+            query = f"DESCRIBE SELECT * FROM '{self.config.feature_matrix_file_path}'"
+            result = self.context.duckdb_con.execute(query).fetchall()
+
+            # result format: [(column_name, column_type, null, key, default, extra), ...]
+            schema = [
+                {"name": row[0], "physical_type": row[1]}
+                for row in result
+            ]
+
+            with open(self.config.schema_file_path, "w", encoding="utf-8") as f:
+                json.dump(schema, f, indent=4)
+                
+            logging.debug("Feature matrix schema saved to: %s", self.config.schema_file_path)
+
+        except Exception as e:
+            logging.exception("Failed to extract or save feature matrix schema.")
+            raise CustomException(e, sys) from e
+
+    def _generate_metadata(self, execution_time: float) -> None:
+        """
+        Generates comprehensive operational metadata, including volumetric counts 
+        from the DuckDB engine.
+        """
+        try:
+            # Efficient out-of-core row counting
+            count_query = f"SELECT COUNT(*) FROM '{self.config.feature_matrix_file_path}'"
+            total_customers = self.context.duckdb_con.execute(count_query).fetchone()[0]
+
+            file_size = os.path.getsize(self.config.feature_matrix_file_path)
+
+            metadata: Dict[str, Any] = {
+                "pipeline_stage": "Feature Matrix Builder",
+                "inference_run_id": self.context.run_id,
+                "execution_time_seconds": execution_time,
+                "data_provenance": {
+                    "snapshot_date": self.config.snapshot_date,
+                    "total_customers_scored": total_customers,
+                    "feature_matrix_size_bytes": file_size
+                },
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }
+
+            with open(self.config.metadata_file_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=4)
+                
+            logging.debug("Feature Matrix Builder metadata saved to: %s", self.config.metadata_file_path)
+
+        except Exception as e:
+            logging.exception("Failed to generate Feature Matrix Builder metadata.")
             raise CustomException(e, sys) from e

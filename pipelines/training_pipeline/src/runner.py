@@ -120,3 +120,13 @@ class TrainingPipeline:
         except Exception as e:
             logging.exception("Training Pipeline execution failed critically.")
             raise CustomException(e, sys) from e
+
+
+if __name__ == "__main__":
+    try:
+        TrainingPipeline.run(
+            run_id="testing_01",
+            training_dataset_s3_uri_path="s3://ml-platform-production/feature_store/testing_01/dataset.parquet"
+        )
+    except Exception as e:
+        raise CustomException(e)
