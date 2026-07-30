@@ -1,11 +1,10 @@
 from dataclasses import dataclass
 
-
 @dataclass(frozen=True)
 class BaselineAndTelemetryResolverArtifact:
     """
-    Artifact containing local paths to the resolved champion model baselines, 
-    current proactive telemetry, historical reactive telemetry, and matured 
+    Artifact containing local paths to the resolved champion model baselines,
+    current proactive telemetry, historical reactive telemetry, and matured
     ground-truth labels required for downstream statistical monitoring.
     """
     champion_run_id: str
@@ -17,19 +16,20 @@ class BaselineAndTelemetryResolverArtifact:
     lookback_labels_file_path: str
     metadata_file_path: str
 
-    def __str__(self) -> str:
-        return (
-            "\nBaselineAndTelemetryResolverArtifact(\n"
-            f"  champion_run_id = {self.champion_run_id}\n"
-            f"  baseline_metrics_file_path = {self.baseline_metrics_file_path}\n"
-            f"  reference_distributions_file_path = {self.reference_distributions_file_path}\n"
-            f"  shap_importance_file_path = {self.shap_importance_file_path}\n"
-            f"  current_telemetry_file_path = {self.current_telemetry_file_path}\n"
-            f"  lookback_telemetry_file_path = {self.lookback_telemetry_file_path}\n"
-            f"  lookback_labels_file_path = {self.lookback_labels_file_path}\n"
-            f"  metadata_file_path = {self.metadata_file_path}\n"
-            ")"
-        )
+
+def __str__(self) -> str:
+    return (
+        "\nBaselineAndTelemetryResolverArtifact(\n"
+        f"  champion_run_id = {self.champion_run_id}\n"
+        f"  baseline_metrics_file_path = {self.baseline_metrics_file_path}\n"
+        f"  reference_distributions_file_path = {self.reference_distributions_file_path}\n"
+        f"  shap_importance_file_path = {self.shap_importance_file_path}\n"
+        f"  current_telemetry_file_path = {self.current_telemetry_file_path}\n"
+        f"  lookback_telemetry_file_path = {self.lookback_telemetry_file_path}\n"
+        f"  lookback_labels_file_path = {self.lookback_labels_file_path}\n"
+        f"  metadata_file_path = {self.metadata_file_path}\n"
+        ")"
+    )
 
 
 @dataclass(frozen=True)
@@ -41,13 +41,14 @@ class StatisticalDriftCalculatorArtifact:
     drift_report_file_path: str
     metadata_file_path: str
 
-    def __str__(self) -> str:
-        return (
-            "\nStatisticalDriftCalculatorArtifact(\n"
-            f"  drift_report_file_path = {self.drift_report_file_path}\n"
-            f"  metadata_file_path = {self.metadata_file_path}\n"
-            ")"
-        )
+
+def __str__(self) -> str:
+    return (
+        "\nStatisticalDriftCalculatorArtifact(\n"
+        f"  drift_report_file_path = {self.drift_report_file_path}\n"
+        f"  metadata_file_path = {self.metadata_file_path}\n"
+        ")"
+    )
 
 
 @dataclass(frozen=True)
@@ -71,8 +72,8 @@ class PerformanceEvaluatorArtifact:
 @dataclass(frozen=True)
 class RuleEngineArtifact:
     """
-    Artifact representing the final state of the Monitoring Pipeline. Contains the 
-    paths to the consolidated immutable audit report, the deterministic trigger 
+    Artifact representing the final state of the Rule Engine. Contains the
+    paths to the consolidated immutable audit report, the deterministic trigger
     payload, the trigger boolean itself, and the component metadata.
     """
     monitoring_report_file_path: str
@@ -80,12 +81,36 @@ class RuleEngineArtifact:
     need_update: bool
     metadata_file_path: str
 
-    def __str__(self) -> str:
-        return (
-            "\nRuleEngineArtifact(\n"
-            f"  monitoring_report_file_path = {self.monitoring_report_file_path}\n"
-            f"  need_update_file_path = {self.need_update_file_path}\n"
-            f"  need_update = {self.need_update}\n"
-            f"  metadata_file_path = {self.metadata_file_path}\n"
-            ")"
-        )
+
+def __str__(self) -> str:
+    return (
+        "\nRuleEngineArtifact(\n"
+        f"  monitoring_report_file_path = {self.monitoring_report_file_path}\n"
+        f"  need_update_file_path = {self.need_update_file_path}\n"
+        f"  need_update = {self.need_update}\n"
+        f"  metadata_file_path = {self.metadata_file_path}\n"
+        ")"
+    )
+
+
+@dataclass(frozen=True)
+class ArtifactPublisherArtifact:
+    """
+    Artifact representing the remote S3 URIs of the curated production artifacts
+    uploaded by the Artifact Publisher component for system observability and orchestration.
+    """
+    s3_audit_report_uri: str
+    s3_action_token_uri: str
+    s3_matured_evaluation_uri: str
+    s3_metadata_uri: str
+
+
+def __str__(self) -> str:
+    return (
+        "\nArtifactPublisherArtifact(\n"
+        f"  s3_audit_report_uri = {self.s3_audit_report_uri}\n"
+        f"  s3_action_token_uri = {self.s3_action_token_uri}\n"
+        f"  s3_matured_evaluation_uri = {self.s3_matured_evaluation_uri}\n"
+        f"  s3_metadata_uri = {self.s3_metadata_uri}\n"
+        ")"
+    )

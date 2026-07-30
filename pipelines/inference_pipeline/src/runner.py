@@ -125,3 +125,11 @@ class InferencePipeline:
         except Exception as e:
             logging.exception("Inference Pipeline execution failed critically for run_id: %s", run_id)
             raise CustomException(e, sys) from e
+
+
+if __name__ == "__main__":
+    try:
+        artifact = InferencePipeline.run(run_id="testing_01")
+        print(artifact)
+    except Exception as e:
+        raise CustomException(e, sys)

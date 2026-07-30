@@ -209,7 +209,7 @@ class ReportPublisherConfig:
             )
             os.makedirs(root_dir, exist_ok=True)
 
-            bucket = cloud_cfg["data_lake"]["database_name"]
+            bucket = cloud_cfg["model_registry"]["bucket_name"]
             base_art = cloud_cfg["inference_outputs"]["base_artifact_dir"]
             
             s3_business_base = f"s3://{bucket}/{base_art}/{cloud_cfg['inference_outputs']['business_reports_dir']}"

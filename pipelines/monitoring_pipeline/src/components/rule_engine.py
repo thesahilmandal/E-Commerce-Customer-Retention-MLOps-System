@@ -2,51 +2,64 @@ import sys
 import json
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
+from pipelines.monitoring_pipeline.src.core.context import MonitoringPipelineContext
 from pipelines.monitoring_pipeline.src.entity.config_entity import RuleEngineConfig
 from pipelines.monitoring_pipeline.src.entity.artifact_entity import (
-    BaselineAndTelemetryResolverArtifact,
-    StatisticalDriftCalculatorArtifact,
-    PerformanceEvaluatorArtifact,
-    RuleEngineArtifact
+BaselineAndTelemetryResolverArtifact,
+StatisticalDriftCalculatorArtifact,
+PerformanceEvaluatorArtifact,
+RuleEngineArtifact
 )
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file
 
-
 class RuleEngine:
     """
     Rule Engine Component for the Monitoring Pipeline.
 
+    ```
     Responsibilities:
     - Operate as the deterministic decision boundary for the MLOps lifecycle.
     - Evaluate label-independent drift metrics and label-dependent performance metrics
-      against strict predefined configuration thresholds.
+    against strict predefined configuration thresholds.
     - Trigger model retraining based on three explicit conditions:
         1. Critical Prediction Drift
         2. Critical Feature Drift
         3. Severe Performance Degradation
     - Output an immutable consolidated monitoring report and a boolean trigger payload
-      (`need_update`) to safely decouple monitoring from continual learning.
+    (`need_update`) to safely decouple monitoring from continual learning orchestration.
     """
 
     def __init__(
         self,
         config: RuleEngineConfig,
+        context: MonitoringPipelineContext,
         resolver_artifact: BaselineAndTelemetryResolverArtifact,
         drift_artifact: StatisticalDriftCalculatorArtifact,
         performance_artifact: PerformanceEvaluatorArtifact
     ) -> None:
         """
         Initializes the Rule Engine.
+
+        Args:
+            config (RuleEngineConfig): Component-specific configuration.
+            context (MonitoringPipelineContext): Global pipeline context containing shared resources.
+            resolver_artifact (BaselineAndTelemetryResolverArtifact): Output from the resolution stage.
+            drift_artifact (StatisticalDriftCalculatorArtifact): Output from the drift calculation stage.
+            performance_artifact (PerformanceEvaluatorArtifact): Output from the performance evaluation stage.
         """
         try:
             self.config = config
+            self.context = context
             self.resolver_artifact = resolver_artifact
             self.drift_artifact = drift_artifact
             self.performance_artifact = performance_artifact
+            
+            data_schema = self.context.config.get("data_schema", {})
+            self.prediction_col = data_schema.get("prediction_column", "predicted_probability")
             
             logging.info("Monitoring Pipeline: Rule Engine component initialized.")
             
@@ -54,9 +67,6 @@ class RuleEngine:
             logging.exception("Failed to initialize Rule Engine.")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # PUBLIC ENTRYPOINT
-    # ==========================================================
     def run(self) -> RuleEngineArtifact:
         """
         Executes the deterministic rule evaluation workflow.
@@ -80,15 +90,21 @@ class RuleEngine:
                 performance_report, baseline_metrics
             )
 
-            # 3. Consolidate Decision
+            # 3. Consolidate Decision and Formulate Trigger Reason
             need_update = bool(cond1_triggered or cond2_triggered or cond3_triggered)
+            trigger_reasons = self._formulate_trigger_reasons(
+                cond1_triggered, cond2_triggered, cond3_triggered
+            )
 
             # 4. Generate Audit Report
             audit_report = {
                 "decision": {
                     "need_update": need_update,
+                    "trigger_reasons": trigger_reasons,
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    "champion_run_id": self.resolver_artifact.champion_run_id
+                    "champion_run_id": self.resolver_artifact.champion_run_id,
+                    "monitoring_run_id": self.context.run_id,
+                    "execution_date": self.context.execution_date
                 },
                 "evaluations": {
                     "condition_1_prediction_drift": cond1_details,
@@ -99,7 +115,7 @@ class RuleEngine:
 
             # 5. Persist Artifacts
             execution_time = round(time.time() - start_time, 2)
-            self._save_artifacts(audit_report, need_update, execution_time)
+            self._save_artifacts(audit_report, need_update, trigger_reasons, execution_time)
 
             # 6. Package and Return Artifact
             artifact = RuleEngineArtifact(
@@ -119,28 +135,22 @@ class RuleEngine:
             logging.exception("Critical Failure: Rule Engine run failed.")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # FILE I/O
-    # ==========================================================
     def _load_json(self, file_path: str) -> Dict[str, Any]:
         """Safely loads a JSON artifact."""
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logging.exception(f"Failed to load JSON artifact at {file_path}")
+            logging.exception("Failed to load JSON artifact at %s", file_path)
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # DETERMINISTIC DECISION RULES
-    # ==========================================================
     def _evaluate_prediction_drift(self, drift_report: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """
         Condition 1: Critical Prediction Drift
         Triggered if the PSI for the predicted probability exceeds the configured threshold.
         """
         try:
-            pred_drift = drift_report.get("prediction_drift", {}).get("predicted_probability", {})
+            pred_drift = drift_report.get("prediction_drift", {}).get(self.prediction_col, {})
             psi_score = pred_drift.get("psi_score", 0.0)
             threshold = self.config.prediction_drift_threshold_psi
 
@@ -148,13 +158,14 @@ class RuleEngine:
 
             details = {
                 "is_triggered": is_triggered,
+                "severity_level": "CRITICAL" if is_triggered else "INFO",
                 "metric": "predicted_probability_psi",
                 "actual_value": psi_score,
                 "threshold": threshold
             }
             
             if is_triggered:
-                logging.warning(f"Condition 1 Triggered: Prediction Drift PSI ({psi_score}) >= {threshold}")
+                logging.warning("Condition 1 Triggered: Prediction Drift PSI (%.4f) >= %.4f", psi_score, threshold)
             
             return is_triggered, details
 
@@ -182,6 +193,7 @@ class RuleEngine:
 
             details = {
                 "is_triggered": is_triggered,
+                "severity_level": "CRITICAL" if is_triggered else "INFO",
                 "metric": "drifted_top_features_count",
                 "actual_value": drifted_count,
                 "threshold": min_features,
@@ -191,8 +203,8 @@ class RuleEngine:
 
             if is_triggered:
                 logging.warning(
-                    f"Condition 2 Triggered: {drifted_count} top features drifted, "
-                    f"exceeding threshold of {min_features}."
+                    "Condition 2 Triggered: %d top features drifted, exceeding threshold of %d.",
+                    drifted_count, min_features
                 )
 
             return is_triggered, details
@@ -218,23 +230,33 @@ class RuleEngine:
                 logging.info("System immature for reactive evaluation. Skipping Condition 3.")
                 return False, {
                     "is_triggered": False,
-                    "reason": "INSUFFICIENT_LOOKBACK_MATURITY"
+                    "severity_level": "INFO",
+                    "reason": performance_report.get("reason", "INSUFFICIENT_LOOKBACK_MATURITY")
                 }
 
             current_brier = performance_report.get("metrics", {}).get("brier_score")
-            baseline_brier = baseline_metrics.get("global_metrics", {}).get("brier_score")
+            
+            # Robust extraction of baseline Brier Score depending on Training Pipeline schema
+            baseline_brier = None
+            if "global_metrics" in baseline_metrics:
+                baseline_brier = baseline_metrics["global_metrics"].get("brier_score")
+            elif "test_metrics" in baseline_metrics:
+                baseline_brier = baseline_metrics["test_metrics"].get("brier_score")
+            elif "brier_score" in baseline_metrics:
+                baseline_brier = baseline_metrics.get("brier_score")
 
             if current_brier is None or baseline_brier is None:
-                raise ValueError("Brier Score missing from performance report or baselines.")
+                raise ValueError("Brier Score missing from performance report or baseline baselines.")
 
             # Calculate degradation threshold boundary
-            degradation_factor = self.config.brier_degradation_threshold
+            degradation_factor = self.config.brier_degradation_threshold_factor
             degradation_boundary = baseline_brier * degradation_factor
 
             is_triggered = current_brier > degradation_boundary
 
             details = {
                 "is_triggered": is_triggered,
+                "severity_level": "CRITICAL" if is_triggered else "INFO",
                 "metric": "brier_score_degradation",
                 "actual_value": current_brier,
                 "baseline_value": baseline_brier,
@@ -244,8 +266,8 @@ class RuleEngine:
 
             if is_triggered:
                 logging.warning(
-                    f"Condition 3 Triggered: Current Brier Score ({current_brier:.4f}) "
-                    f"exceeds degradation boundary ({degradation_boundary:.4f})."
+                    "Condition 3 Triggered: Current Brier Score (%.4f) exceeds degradation boundary (%.4f).",
+                    current_brier, degradation_boundary
                 )
 
             return is_triggered, details
@@ -254,29 +276,62 @@ class RuleEngine:
             logging.exception("Failed to evaluate Condition 3 (Performance Degradation).")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # ARTIFACT PERSISTENCE
-    # ==========================================================
-    def _save_artifacts(self, audit_report: Dict[str, Any], need_update: bool, execution_time: float) -> None:
+    def _formulate_trigger_reasons(
+        self, 
+        cond1_triggered: bool, 
+        cond2_triggered: bool, 
+        cond3_triggered: bool
+    ) -> str:
+        """
+        Combines triggered conditions into a standardized reason string for downstream orchestration.
+        """
+        reasons: List[str] = []
+        if cond1_triggered:
+            reasons.append("CRITICAL_PREDICTION_DRIFT")
+        if cond2_triggered:
+            reasons.append("CRITICAL_FEATURE_DRIFT")
+        if cond3_triggered:
+            reasons.append("SEVERE_PERFORMANCE_DEGRADATION")
+
+        return " | ".join(reasons) if reasons else "NONE"
+
+    def _save_artifacts(
+        self, 
+        audit_report: Dict[str, Any], 
+        need_update: bool, 
+        trigger_reasons: str, 
+        execution_time: float
+    ) -> None:
         """
         Saves the consolidated monitoring report, the deterministic trigger payload, and metadata.
         """
         try:
             # 1. Save Full Audit Report
             write_json_file(file_path=self.config.monitoring_report_file_path, content=audit_report)
-            logging.info(f"Consolidated monitoring audit report saved to: {self.config.monitoring_report_file_path}")
+            logging.info("Consolidated monitoring audit report saved to: %s", self.config.monitoring_report_file_path)
 
-            # 2. Save Deterministic Trigger Payload
-            trigger_payload = {"need_update": need_update}
+            # 2. Save Deterministic Trigger Payload for Master Orchestrator
+            trigger_payload = {
+                "need_update": need_update,
+                "trigger_reason": trigger_reasons,
+                "champion_run_id": self.resolver_artifact.champion_run_id,
+                "monitoring_run_id": self.context.run_id,
+                "execution_date": self.context.execution_date,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+            }
             write_json_file(file_path=self.config.need_update_file_path, content=trigger_payload)
-            logging.debug(f"Retraining trigger payload saved to: {self.config.need_update_file_path}")
+            logging.debug("Retraining trigger payload saved to: %s", self.config.need_update_file_path)
 
             # 3. Save Operational Metadata
             metadata: Dict[str, Any] = {
                 "pipeline_stage": "Monitoring Rule Engine",
                 "execution_time_seconds": execution_time,
                 "decision_rendered": need_update,
-                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                "trigger_reasons": trigger_reasons,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "orchestration": {
+                    "run_id": self.context.run_id
+                }
             }
             write_json_file(file_path=self.config.metadata_file_path, content=metadata)
             

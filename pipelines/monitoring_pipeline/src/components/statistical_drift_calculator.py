@@ -7,50 +7,59 @@ from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 
+from pipelines.monitoring_pipeline.src.core.context import MonitoringPipelineContext
 from pipelines.monitoring_pipeline.src.entity.config_entity import StatisticalDriftCalculatorConfig
 from pipelines.monitoring_pipeline.src.entity.artifact_entity import (
-    BaselineAndTelemetryResolverArtifact,
-    StatisticalDriftCalculatorArtifact
+BaselineAndTelemetryResolverArtifact,
+StatisticalDriftCalculatorArtifact
 )
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file
 
-
 class StatisticalDriftCalculator:
     """
     Statistical Drift Calculator Component.
 
+    ```
     Responsibilities:
     - Operate as a proactive, label-independent diagnostic engine.
     - Identify the top N most influential predictive features using training SHAP baselines.
     - Compute the Population Stability Index (PSI) for the predicted probability distribution.
     - Compute the PSI for the identified top N features to detect covariate shift.
     - Gracefully handle both numerical and categorical feature distributions based on the
-      physical types recorded during model training.
+    physical types recorded during model training.
     - Guarantee robust statistical evaluation by enforcing strict bin edge / category continuity 
-      from the reference baseline and algorithmically mitigating the Zero-Bin Problem.
+    from the reference baseline and algorithmically mitigating the Zero-Bin Problem.
     """
 
     def __init__(
         self,
         config: StatisticalDriftCalculatorConfig,
+        context: MonitoringPipelineContext,
         resolver_artifact: BaselineAndTelemetryResolverArtifact
     ) -> None:
         """
         Initializes the Statistical Drift Calculator.
+
+        Args:
+            config (StatisticalDriftCalculatorConfig): Component-specific configuration.
+            context (MonitoringPipelineContext): Global pipeline context containing shared resources.
+            resolver_artifact (BaselineAndTelemetryResolverArtifact): Artifacts from the resolution stage.
         """
         try:
             self.config = config
+            self.context = context
             self.resolver_artifact = resolver_artifact
+            
+            data_schema = self.context.config.get("data_schema", {})
+            self.prediction_col = data_schema.get("prediction_column", "predicted_probability")
+            
             logging.info("Monitoring Pipeline: Statistical Drift Calculator initialized.")
         except Exception as e:
             logging.exception("Failed to initialize Statistical Drift Calculator.")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # PUBLIC ENTRYPOINT
-    # ==========================================================
     def run(self) -> StatisticalDriftCalculatorArtifact:
         """
         Executes the PSI-based statistical drift calculation workflow.
@@ -93,27 +102,25 @@ class StatisticalDriftCalculator:
                 metadata_file_path=self.config.metadata_file_path
             )
 
-            logging.info("Statistical drift calculation completed successfully: %s", artifact)
+            logging.info("Statistical drift calculation completed successfully.")
             return artifact
 
         except Exception as e:
             logging.exception("Critical Failure: Statistical Drift Calculator run failed.")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # DATA & BASELINE LOADING
-    # ==========================================================
     def _load_current_telemetry(self) -> pd.DataFrame:
         """
         Loads the daily proactive inference telemetry directly into a Pandas DataFrame.
+        Returns an empty DataFrame gracefully if the file is structurally empty.
         """
         try:
             path = self.resolver_artifact.current_telemetry_file_path
             df = pd.read_parquet(path)
-            logging.info(f"Loaded current telemetry with {len(df)} records.")
+            logging.info("Loaded current telemetry with %d records.", len(df))
             return df
         except Exception as e:
-            logging.exception(f"Failed to load telemetry parquet from: {self.resolver_artifact.current_telemetry_file_path}")
+            logging.exception("Failed to load telemetry parquet from: %s", self.resolver_artifact.current_telemetry_file_path)
             raise CustomException(e, sys) from e
 
     def _load_json(self, file_path: str) -> Dict[str, Any]:
@@ -124,7 +131,7 @@ class StatisticalDriftCalculator:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logging.exception(f"Failed to load baseline JSON from: {file_path}")
+            logging.exception("Failed to load baseline JSON from: %s", file_path)
             raise CustomException(e, sys) from e
 
     def _extract_top_shap_features(self, shap_data: Dict[str, Any]) -> List[str]:
@@ -151,16 +158,13 @@ class StatisticalDriftCalculator:
                 if feature.get("feature_name")
             ]
             
-            logging.info(f"Resolved top {top_k} SHAP features for drift monitoring: {top_feature_names}")
+            logging.info("Resolved top %d SHAP features for drift monitoring: %s", top_k, top_feature_names)
             return top_feature_names
 
         except Exception as e:
             logging.exception("Failed to parse SHAP baseline data.")
             raise CustomException(e, sys) from e
 
-    # ==========================================================
-    # PSI CALCULATION ENGINE
-    # ==========================================================
     def _calculate_all_drifts(
         self, 
         telemetry_df: pd.DataFrame, 
@@ -175,18 +179,25 @@ class StatisticalDriftCalculator:
             "feature_drift": {}
         }
 
+        # Handle empty telemetry scenario safely
+        if telemetry_df.empty:
+            logging.warning("Telemetry DataFrame is empty. Logging 0.0 PSI for all components.")
+            drift_report["prediction_drift"][self.prediction_col] = {"psi_score": 0.0, "status": "EMPTY_TELEMETRY"}
+            for feature in top_features:
+                drift_report["feature_drift"][feature] = {"psi_score": 0.0, "status": "EMPTY_TELEMETRY"}
+            return drift_report
+
         # 1. Prediction Drift (Target = predicted_probability)
-        pred_col = "predicted_probability"
-        if pred_col in telemetry_df.columns and pred_col in reference_distributions:
-            ref_stats = reference_distributions[pred_col]
-            psi_val = self._compute_psi_router(telemetry_df[pred_col], ref_stats)
-            drift_report["prediction_drift"]["predicted_probability"] = {
+        if self.prediction_col in telemetry_df.columns and self.prediction_col in reference_distributions:
+            ref_stats = reference_distributions[self.prediction_col]
+            psi_val = self._compute_psi_router(telemetry_df[self.prediction_col], ref_stats)
+            drift_report["prediction_drift"][self.prediction_col] = {
                 "psi_score": round(psi_val, 4),
                 "status": "CALCULATED"
             }
         else:
-            logging.warning(f"Could not compute prediction drift. Missing '{pred_col}' in telemetry or baselines.")
-            drift_report["prediction_drift"]["predicted_probability"] = {
+            logging.warning("Could not compute prediction drift. Missing '%s' in telemetry or baselines.", self.prediction_col)
+            drift_report["prediction_drift"][self.prediction_col] = {
                 "psi_score": 0.0,
                 "status": "MISSING_DATA"
             }
@@ -194,12 +205,12 @@ class StatisticalDriftCalculator:
         # 2. Feature Drift (Top N SHAP Features)
         for feature in top_features:
             if feature not in telemetry_df.columns:
-                logging.warning(f"Feature '{feature}' not found in telemetry. Skipping PSI.")
+                logging.warning("Feature '%s' not found in telemetry. Skipping PSI.", feature)
                 drift_report["feature_drift"][feature] = {"psi_score": 0.0, "status": "MISSING_IN_TELEMETRY"}
                 continue
             
             if feature not in reference_distributions:
-                logging.warning(f"Feature '{feature}' not found in reference baseline. Skipping PSI.")
+                logging.warning("Feature '%s' not found in reference baseline. Skipping PSI.", feature)
                 drift_report["feature_drift"][feature] = {"psi_score": 0.0, "status": "MISSING_IN_BASELINE"}
                 continue
 
@@ -222,7 +233,7 @@ class StatisticalDriftCalculator:
         Routes the PSI calculation to the appropriate method based on the physical type 
         of the feature recorded in the baseline distributions.
         """
-        physical_type = reference_stats.get("physical_type", "numerical")
+        physical_type = reference_stats.get("physical_type", "numerical").lower()
         
         if physical_type == "categorical":
             return self._compute_categorical_psi(current_series, reference_stats)
@@ -268,7 +279,7 @@ class StatisticalDriftCalculator:
             actual_pct = counts / total_count
 
             # The Zero-Bin Problem Mitigation
-            epsilon = 1e-4
+            epsilon = self.config.zero_bin_epsilon_psi
             actual_pct_clipped = np.maximum(actual_pct, epsilon)
             expected_pct_clipped = np.maximum(expected_pct, epsilon)
 
@@ -280,7 +291,7 @@ class StatisticalDriftCalculator:
             psi_components = (actual_pct_norm - expected_pct_norm) * np.log(actual_pct_norm / expected_pct_norm)
             return float(np.sum(psi_components))
 
-        except Exception as e:
+        except Exception:
             logging.exception("Mathematical error encountered during numerical PSI calculation.")
             return 0.0
 
@@ -318,7 +329,7 @@ class StatisticalDriftCalculator:
             actual_pct = counts / total_count
 
             # The Zero-Bin Problem Mitigation
-            epsilon = 1e-4
+            epsilon = self.config.zero_bin_epsilon_psi
             actual_pct_clipped = np.maximum(actual_pct, epsilon)
             expected_pct_clipped = np.maximum(expected_pct, epsilon)
 
@@ -330,13 +341,10 @@ class StatisticalDriftCalculator:
             psi_components = (actual_pct_norm - expected_pct_norm) * np.log(actual_pct_norm / expected_pct_norm)
             return float(np.sum(psi_components))
 
-        except Exception as e:
+        except Exception:
             logging.exception("Mathematical error encountered during categorical PSI calculation.")
             return 0.0
 
-    # ==========================================================
-    # ARTIFACT & METADATA GENERATION
-    # ==========================================================
     def _save_reports(self, drift_report: Dict[str, Any], execution_time: float, population_size: int) -> None:
         """
         Persists the drift calculations and generates component observability metadata.
@@ -344,7 +352,7 @@ class StatisticalDriftCalculator:
         try:
             # 1. Save Drift Report
             write_json_file(file_path=self.config.drift_report_file_path, content=drift_report)
-            logging.info(f"Statistical drift report saved to: {self.config.drift_report_file_path}")
+            logging.info("Statistical drift report saved to: %s", self.config.drift_report_file_path)
 
             # 2. Save Operational Metadata
             metadata: Dict[str, Any] = {
@@ -355,9 +363,12 @@ class StatisticalDriftCalculator:
                 },
                 "configuration_applied": {
                     "top_shap_features_monitored": self.config.top_shap_features_count,
-                    "zero_bin_epsilon": 1e-4
+                    "zero_bin_epsilon": self.config.zero_bin_epsilon_psi
                 },
-                "timestamp_utc": datetime.now(timezone.utc).isoformat()
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "orchestration": {
+                    "run_id": self.context.run_id
+                }
             }
             write_json_file(file_path=self.config.metadata_file_path, content=metadata)
             
