@@ -1,0 +1,65 @@
+# =====================================================================================
+# INFERENCE PIPELINE GLOBAL CONFIGURATION
+# 
+# This file serves as the single source of truth for all static configurations,
+# S3 URIs, business logic thresholds, and artifact naming conventions required by
+# the Inference Pipeline. It enforces parity with the Training Pipeline architecture.
+# =====================================================================================
+
+system:
+  artifact_dir: "artifacts"
+  pipeline_name: "inference_pipeline"
+
+business_logic:
+  target_column: "target_is_churn"
+  churn_probability_threshold: 0.5
+  system_columns_to_drop:
+    - "customer_unique_id"
+    - "snapshot_date"
+
+cloud_storage:
+  data_lake:
+    database_name: "company-central-data-lake"
+    bronze_dir: "bronze"
+  
+  model_registry:
+    bucket_name: "ml-platform-production"
+    registry_dir: "model_registry"
+    state_dir: "state"
+    pointer_file: "model_state.json"
+  
+  inference_outputs:
+    base_artifact_dir: "inference_pipeline_artifacts"
+    business_reports_dir: "business_reports/customer_churn"
+    mlops_telemetry_dir: "mlops_telemetry/inference_logs"
+    metadata_dir: "inference_metadata"
+
+components:
+  model_loader:
+    dir_name: "01_model_loader"
+    model_file: "model.pkl"
+    schema_file: "schema.json"
+    baseline_metrics_file: "baseline_performance_metrics.json"
+    reference_distributions_file: "reference_feature_distributions.json"
+    metadata_file: "metadata.json"
+
+  feature_matrix_builder:
+    dir_name: "02_input_feature_matrix_builder"
+    feature_matrix_file: "input_feature_matrix.parquet"
+    schema_file: "schema.json"
+    metadata_file: "metadata.json"
+
+  inference_validator:
+    dir_name: "03_validator"
+    report_file: "report.json"
+    metadata_file: "metadata.json"
+
+  report_generator:
+    dir_name: "04_report_generator"
+    csv_report_file: "churn_predictions.csv"
+    telemetry_file: "telemetry.parquet"
+    metadata_file: "metadata.json"
+
+  report_publisher:
+    dir_name: "05_report_publisher"
+    metadata_file: "metadata.json"

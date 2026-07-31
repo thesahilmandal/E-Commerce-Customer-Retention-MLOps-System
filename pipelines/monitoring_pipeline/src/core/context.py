@@ -25,7 +25,7 @@ class MonitoringPipelineContext:
         self,
         run_id: Optional[str] = None,
         execution_date: Optional[str] = None,
-        config_path: str = os.path.join("pipelines", "monitoring_pipeline", "config", "global_config.yaml")
+        config_path: str = os.path.join("pipelines", "monitoring_pipeline", "configs", "global_config.yaml")
     ) -> None:
         """
         Initializes the Monitoring Pipeline Context.

@@ -144,6 +144,6 @@ class MonitoringPipelineRunner:
 
 if __name__ == "__main__":
     try:
-        MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-07-30").run()
+        MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-07-31").run()
     except Exception as e:
         raise CustomException(e, sys)

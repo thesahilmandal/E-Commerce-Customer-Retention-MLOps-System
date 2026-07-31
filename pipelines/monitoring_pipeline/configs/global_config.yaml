@@ -1,0 +1,65 @@
+project_config:
+  pipeline_name: "monitoring_pipeline"
+  local_artifact_dir: "artifacts"
+
+data_schema:
+  customer_id_column: "customer_unique_id"
+  target_column: "target_is_churn"
+  prediction_column: "predicted_probability"
+
+cloud_storage:
+  s3_data_lake_bucket: "ml-platform-production"
+  s3_bronze_layer_prefix: "bronze"
+  s3_model_registry_prefix: "model_registry"
+  s3_model_registry_state_dir: "state"
+  s3_model_registry_pointer_file: "model_state.json"
+  s3_inference_telemetry_prefix: "inference_pipeline_artifacts/mlops_telemetry/inference_logs"
+  
+  s3_monitoring_output_prefix: "monitoring_pipeline_artifacts"
+  s3_monitoring_audit_reports_dir: "audit_reports"
+  s3_monitoring_action_tokens_dir: "action_tokens"
+  s3_monitoring_matured_evaluations_dir: "matured_evaluations"
+  s3_monitoring_metadata_dir: "monitoring_metadata"
+
+monitoring_parameters:
+  lookback_period_days: 30
+  top_shap_features_count: 5
+  zero_bin_epsilon_psi: 0.0001
+  log_loss_epsilon: 1.0e-15
+
+financial_parameters:
+  campaign_cost: 10.0
+  customer_ltv: 150.0
+  intervention_save_rate: 0.20
+
+rule_engine_thresholds:
+  prediction_drift_threshold_psi: 0.20
+  feature_drift_threshold_psi: 0.20
+  min_drifted_features_for_retrain: 2
+  brier_degradation_threshold_factor: 1.05
+
+component_config:
+  baseline_and_telemetry_resolver:
+    dir_name: "01_baseline_and_telemetry_resolver"
+    current_telemetry_file: "current_telemetry.parquet"
+    lookback_telemetry_file: "lookback_telemetry.parquet"
+    lookback_labels_file: "lookback_matured_labels.parquet"
+    baseline_metrics_file: "baseline_performance_metrics.json"
+    reference_distributions_file: "reference_feature_distributions.json"
+    shap_importance_file: "shap_feature_importance_summary.json"
+
+  statistical_drift_calculator:
+    dir_name: "02_statistical_drift_calculator"
+    drift_report_file: "drift_report.json"
+
+  performance_evaluator:
+    dir_name: "03_performance_evaluator"
+    performance_report_file: "performance_report.json"
+
+  rule_engine:
+    dir_name: "04_rule_engine"
+    monitoring_report_file: "monitoring_report.json"
+    need_update_file: "need_update.json"
+
+  artifact_publisher:
+    dir_name: "05_artifact_publisher"

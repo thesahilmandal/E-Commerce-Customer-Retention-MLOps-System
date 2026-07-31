@@ -23,7 +23,7 @@ class ConfigParser:
         "components"
     ]
 
-    def __init__(self, config_path: str = "pipelines/inference_pipeline/config/global_config.yaml") -> None:
+    def __init__(self, config_path: str = "pipelines/inference_pipeline/configs/global_config.yaml") -> None:
         """
         Initializes the ConfigParser and loads the YAML configuration.
 
