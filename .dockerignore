@@ -1,0 +1,29 @@
+# 1. Version Control (Massive size saver)
+.git
+.gitignore
+
+# 2. Virtual Environments & Python Cache (Prevents architecture conflicts)
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 3. Local Data & Temp Workspaces (Prevents uploading gigabytes to the Docker engine)
+temp_hive_workspace/
+*.parquet
+*.csv
+*.json
+
+# 4. Secrets & Credentials (Security safeguard)
+.env
+*.pem
+credentials
+config
+
+# 5. IDE & OS Junk
+.vscode/
+.idea/
+.DS_Store
