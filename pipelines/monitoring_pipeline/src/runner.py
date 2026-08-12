@@ -1,5 +1,4 @@
 import sys
-import argparse
 from typing import Optional
 
 from pipelines.monitoring_pipeline.src.core.context import MonitoringPipelineContext
@@ -144,6 +143,6 @@ class MonitoringPipelineRunner:
 
 if __name__ == "__main__":
     try:
-        MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-07-31").run()
+        MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-08-11").run()
     except Exception as e:
         raise CustomException(e, sys)
