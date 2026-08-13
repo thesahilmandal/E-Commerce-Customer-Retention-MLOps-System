@@ -1,0 +1,13 @@
+boto3==1.42.59
+duckdb==1.5.1
+joblib==1.5.3
+numpy==2.4.2
+optuna==4.8.0
+pandas==2.3.3
+pyarrow==22.0.0
+python-json-logger==4.0.0
+scikit-learn==1.8.0
+shap==0.51.0
+xgboost==3.2.0
+matplotlib>=3.8.0
+PyYAML==6.0.2

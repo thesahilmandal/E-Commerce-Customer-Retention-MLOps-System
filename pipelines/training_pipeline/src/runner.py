@@ -1,22 +1,24 @@
 """
 Runner Module for the Training Pipeline.
 
-This module provides the main orchestrator for the Training Pipeline. 
-It defines the `TrainingPipeline` class and its `run` method, which is responsible 
-for managing the execution lifecycle, initializing the Dependency Injection container 
+This module provides the main orchestrator for the Training Pipeline.
+It defines the `TrainingPipeline` class and its `run` method, which is responsible
+for managing the execution lifecycle, initializing the Dependency Injection container
 (PipelineContext), and executing the Directed Acyclic Graph (DAG) of pipeline components.
+It provides a robust CLI interface suitable for execution via Docker ENTRYPOINT.
 """
 
 import sys
+import argparse
 
 from pipelines.training_pipeline.src.core.config_parser import ConfigParser
 from pipelines.training_pipeline.src.core.context import PipelineContext
 
 from pipelines.training_pipeline.src.entity.config_entity import (
-    DataProcessorConfig,
-    ModelTrainerConfig,
-    ModelEvaluatorConfig,
-    ModelRegistryConfig,
+DataProcessorConfig,
+ModelTrainerConfig,
+ModelEvaluatorConfig,
+ModelRegistryConfig,
 )
 
 from pipelines.training_pipeline.src.components.data_processor import DataProcessor
@@ -27,11 +29,11 @@ from pipelines.training_pipeline.src.components.model_registry import ModelRegis
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
-
 class TrainingPipeline:
     """
     Main orchestrator for the Training Pipeline.
 
+    ```
     Responsibilities:
     - Expose the standardized entry point: `TrainingPipeline.run(run_id, dataset_uri)`.
     - Coordinate the execution of Data Processor, Model Trainer, Evaluator, and Registry.
@@ -46,7 +48,7 @@ class TrainingPipeline:
 
         Args:
             run_id (str): Unique identifier for this pipeline execution, ensuring traceable 
-                          lineage and isolated S3/local artifact directories.
+                        lineage and isolated S3/local artifact directories.
             training_dataset_s3_uri_path (str): The exact S3 URI of the Master Panel generated 
                                                 by the upstream Data Pipeline.
 
@@ -121,12 +123,64 @@ class TrainingPipeline:
             logging.exception("Training Pipeline execution failed critically.")
             raise CustomException(e, sys) from e
 
+def main() -> None:
+    """
+    Main CLI entry point for the Training Pipeline.
+    Parses arguments and initiates the pipeline execution.
+    """
+    parser = argparse.ArgumentParser(
+    description="Orchestrator for the ML Training Pipeline.",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-if __name__ == "__main__":
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        required=True,
+        help="Unique identifier for this pipeline execution to ensure traceable lineage."
+    )
+
+    parser.add_argument(
+        "--dataset-uri",
+        type=str,
+        required=True,
+        help="The S3 URI of the Master Panel dataset (e.g., s3://bucket-name/path/to/dataset.parquet)."
+    )
+
+    args = parser.parse_args()
+
+    run_id = args.run_id.strip()
+    dataset_uri = args.dataset_uri.strip()
+
+    if not run_id:
+        logging.error("Validation Error: '--run-id' cannot be empty or whitespace.")
+        sys.exit(2)
+
+    if not dataset_uri.startswith("s3://") or not dataset_uri.endswith(".parquet"):
+        logging.error("Validation Error: '--dataset-uri' must be a valid S3 URI pointing to a .parquet file.")
+        sys.exit(2)
+
     try:
         TrainingPipeline.run(
-            run_id="testing_01",
-            training_dataset_s3_uri_path="s3://ml-platform-production/feature_store/testing_01/dataset.parquet"
+            run_id=run_id,
+            training_dataset_s3_uri_path=dataset_uri
         )
+        sys.exit(0)
     except Exception as e:
-        raise CustomException(e)
+        # Exception details are already logged by the TrainingPipeline,
+        # but we exit cleanly with a failure code for Docker/orchestrators.
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# if __name__ == "__main__":
+#     try:
+#         TrainingPipeline.run(
+#             run_id="testing_01",
+#             training_dataset_s3_uri_path="s3://ml-platform-production/feature_store/testing_01/dataset.parquet"
+#         )
+#     except Exception as e:
+#         raise CustomException(e)

@@ -1,0 +1,82 @@
+# ==============================================================================
+# STAGE 1: Builder
+# ==============================================================================
+
+FROM python:3.12.1-slim-bookworm AS builder
+
+# Prevent Python from writing pyc files and buffer stdout/stderr
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install system dependencies required for building C-linked Python packages
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate a virtual environment
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy the pipeline-specific requirements
+
+# (Assumes the build context is the repository root)
+
+COPY pipelines/training_pipeline/requirements.txt /tmp/requirements.txt
+
+# Install dependencies into the virtual environment
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ==============================================================================
+# STAGE 2: Runtime
+# ==============================================================================
+
+FROM python:3.12.1-slim-bookworm AS runtime
+
+# Set environment variables for runtime execution
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/app"
+
+# Install root CA certificates for boto3 S3 TLS verification and libgomp1 for XGBoost/Scikit-Learn OpenMP support
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user and group for security compliance
+
+RUN groupadd -r pipelineuser && useradd -r -g pipelineuser -d /app -s /sbin/nologin pipelineuser
+
+WORKDIR /app
+
+# Copy the pre-built virtual environment from the builder stage
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Copy only the shared core and the specific pipeline source code.
+# Avoiding COPY . . prevents massive datasets, caches, or other pipelines from bloating the image.
+
+COPY shared_core/ /app/shared_core/
+COPY pipelines/training_pipeline/ /app/pipelines/training_pipeline/
+
+# Ensure the non-root user owns the application directory (allows dynamic artifact creation & DuckDB extension downloads)
+
+RUN chown -R pipelineuser:pipelineuser /app
+
+# Downgrade privileges to the non-root user
+
+USER pipelineuser
+
+# Expose no ports; this is a batch processing container, not an API
+
+# Use module invocation (-m) to automatically resolve the PYTHONPATH to /app
+
+ENTRYPOINT ["python", "-m", "pipelines.training_pipeline.src.runner"]
