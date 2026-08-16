@@ -1,0 +1,33 @@
+name: OIDC Authentication Test
+
+# This triggers the workflow manually from the GitHub UI
+on:
+  workflow_dispatch:
+
+# CRITICAL: These permissions are required to generate the OIDC token
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-aws-connection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Test S3 Access (Data Lake)
+        run: |
+          echo "Testing read access to the Data Lake..."
+          aws s3 ls s3://company-central-data-lake
+          
+      - name: Test S3 Access (ML Platform)
+        run: |
+          echo "Testing read/write access to ML Platform..."
+          aws s3 ls s3://ml-platform-production
