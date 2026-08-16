@@ -179,7 +179,7 @@ def main() -> None:
     try:
         datetime.strptime(execution_date, "%Y-%m-%d")
     except ValueError:
-        logging.error("Validation Error: '--execution-date' must be a valid date in YYYY-MM-DD format.")
+        logging.error("Validation Error: 'f' must be a valid date in YYYY-MM-DD format.")
         sys.exit(2)
 
     try:
