@@ -1,0 +1,228 @@
+name: Master Orchestrator (Nightly MLOps)
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Runs nightly at 2:00 AM UTC
+  workflow_dispatch:    # Allows manual triggering from GitHub UI
+
+# CRITICAL: Prevents race conditions. If a previous nightly run is somehow 
+# still executing, this prevents a new one from starting and overlapping data.
+concurrency:
+  group: production-mlops-orchestrator
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # Required for secure AWS OIDC Authentication
+  contents: read
+
+env:
+  IMAGE_TAG: ${{ github.sha }} # Uses the latest immutable commit SHA
+
+jobs:
+  # ==========================================
+  # 0. GLOBAL INITIALIZATION
+  # ==========================================
+  initialize:
+    name: 0. Initialize Variables & Temporal Windows
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.set-vars.outputs.run_id }}
+      exec_date: ${{ steps.set-vars.outputs.exec_date }}
+      start_date: ${{ steps.set-vars.outputs.start_date }}
+      end_date: ${{ steps.set-vars.outputs.end_date }}
+      hive_path: ${{ steps.set-vars.outputs.hive_path }}
+    steps:
+      - name: Calculate Dates and Identifiers
+        id: set-vars
+        run: |
+          # Create a globally unique Run ID tied to this specific execution attempt
+          RUN_ID="run_${{ github.run_id }}_${{ github.run_attempt }}"
+          
+          # Calculate logical execution date and temporal windows
+          EXEC_DATE=$(date +'%Y-%m-%d')
+          START_DATE=$(date -d "365 days ago" +'%Y-%m-%d')
+          END_DATE=$(date -d "30 days ago" +'%Y-%m-%d')
+          
+          # Calculate Hive partitions for S3 paths
+          YEAR=$(date +'%Y')
+          MONTH=$(date +'%m')
+          DAY=$(date +'%d')
+          HIVE_PATH="year=$YEAR/month=$MONTH/day=$DAY"
+
+          # Export variables so downstream containers can consume them
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "exec_date=$EXEC_DATE" >> $GITHUB_OUTPUT
+          echo "start_date=$START_DATE" >> $GITHUB_OUTPUT
+          echo "end_date=$END_DATE" >> $GITHUB_OUTPUT
+          echo "hive_path=$HIVE_PATH" >> $GITHUB_OUTPUT
+
+  # ==========================================
+  # 1. INFERENCE PIPELINE
+  # ==========================================
+  inference-pipeline:
+    name: 1. Inference Pipeline
+    runs-on: ubuntu-latest
+    needs: initialize
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Execute Inference Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          RUN_ID: ${{ needs.initialize.outputs.run_id }}
+          EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
+        run: |
+          docker run --rm \
+            -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
+            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
+            $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG \
+            --run-id $RUN_ID \
+
+  # ==========================================
+  # 2. MONITORING PIPELINE
+  # ==========================================
+  monitoring-pipeline:
+    name: 2. Monitoring Pipeline
+    runs-on: ubuntu-latest
+    needs: [initialize, inference-pipeline] # Halts if Inference fails
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Execute Monitoring Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          RUN_ID: ${{ needs.initialize.outputs.run_id }}
+          EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
+        run: |
+          docker run --rm \
+            -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
+            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
+            $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG \
+            --run-id $RUN_ID \
+            --execution-date $EXEC_DATE
+
+  # ==========================================
+  # 3. DECISION GATE (S3 Contract Interface)
+  # ==========================================
+  decision-gate:
+    name: 3. Evaluate Retraining Artifact
+    runs-on: ubuntu-latest
+    needs: [initialize, monitoring-pipeline] # Halts if Monitoring fails
+    outputs:
+      need_update: ${{ steps.check_decision.outputs.decision }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          
+      - name: Parse Monitoring Artifact
+        id: check_decision
+        env:
+          RUN_ID: ${{ needs.initialize.outputs.run_id }}
+          HIVE_PATH: ${{ needs.initialize.outputs.hive_path }}
+        run: |
+          S3_URI="s3://ml-platform-production/monitoring_pipeline_artifacts/action_tokens/$HIVE_PATH/need_update_$RUN_ID.json"
+          
+          # Explicitly check if the artifact exists to prevent false positives
+          if aws s3 ls "$S3_URI" > /dev/null 2>&1; then
+            echo "Artifact found. Downloading..."
+            aws s3 cp "$S3_URI" ./token.json
+            
+            # Use 'jq' to parse the boolean out of the JSON securely
+            DECISION=$(jq -r '.need_update' token.json)
+            REASON=$(jq -r '.trigger_reason' token.json)
+            
+            echo "Retraining Decision: $DECISION (Reason: $REASON)"
+            echo "decision=$DECISION" >> $GITHUB_OUTPUT
+          else
+            echo "CRITICAL ERROR: Monitoring succeeded but artifact was not found at $S3_URI"
+            exit 1 # Halt the workflow loudly
+          fi
+
+  # ==========================================
+  # 4. DATA PIPELINE (Conditional)
+  # ==========================================
+  data-pipeline:
+    name: 4. Data Preparation (Continual Learning)
+    runs-on: ubuntu-latest
+    needs: [initialize, decision-gate]
+    if: needs.decision-gate.outputs.need_update == 'true' # Branches here!
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Execute Data Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          RUN_ID: ${{ needs.initialize.outputs.run_id }}
+          START_DATE: ${{ needs.initialize.outputs.start_date }}
+          END_DATE: ${{ needs.initialize.outputs.end_date }}
+        run: |
+          docker run --rm \
+            -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
+            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
+            $ECR_REGISTRY/data-pipeline:$IMAGE_TAG \
+            --run-id $RUN_ID \
+            --start-date $START_DATE \
+            --end-date $END_DATE
+
+  # ==========================================
+  # 5. TRAINING PIPELINE (Conditional)
+  # ==========================================
+  training-pipeline:
+    name: 5. Model Training & Promotion
+    runs-on: ubuntu-latest
+    needs: [initialize, decision-gate, data-pipeline] # Halts if Data Pipeline fails
+    if: needs.decision-gate.outputs.need_update == 'true'
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Execute Training Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          RUN_ID: ${{ needs.initialize.outputs.run_id }}
+          DATASET_URI: "s3://ml-platform-production/feature_store/${{ needs.initialize.outputs.run_id }}/dataset.parquet"
+        run: |
+          docker run --rm \
+            -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
+            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
+            $ECR_REGISTRY/training-pipeline:$IMAGE_TAG \
+            --run-id $RUN_ID \
+            --training-dataset-s3-uri-path $DATASET_URI
