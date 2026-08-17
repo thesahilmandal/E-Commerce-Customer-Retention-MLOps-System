@@ -81,13 +81,14 @@ jobs:
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
           docker run --rm \
-            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+            -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
             $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG \
-            --run-id $RUN_ID 
-            
+            --run-id $RUN_ID
+
   # ==========================================
   # 2. MONITORING PIPELINE
   # ==========================================
@@ -113,10 +114,11 @@ jobs:
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
           docker run --rm \
-            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+            -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
             $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG \
             --run-id $RUN_ID \
             --execution-date $EXEC_DATE
@@ -188,10 +190,11 @@ jobs:
           END_DATE: ${{ needs.initialize.outputs.end_date }}
         run: |
           docker run --rm \
-            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+            -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
             $ECR_REGISTRY/data-pipeline:$IMAGE_TAG \
             --run-id $RUN_ID \
             --start-date $START_DATE \
@@ -223,10 +226,11 @@ jobs:
           DATASET_URI: "s3://ml-platform-production/feature_store/${{ needs.initialize.outputs.run_id }}/dataset.parquet"
         run: |
           docker run --rm \
-            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+            -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
             $ECR_REGISTRY/training-pipeline:$IMAGE_TAG \
             --run-id $RUN_ID \
             --training-dataset-s3-uri-path $DATASET_URI
