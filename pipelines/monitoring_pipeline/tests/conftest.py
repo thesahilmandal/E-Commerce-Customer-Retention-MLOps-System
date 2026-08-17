@@ -1,4 +1,3 @@
-import os
 import pytest
 import duckdb
 from unittest.mock import patch
@@ -8,8 +7,7 @@ from pipelines.monitoring_pipeline.src.entity.artifact_entity import (
     BaselineAndTelemetryResolverArtifact,
     StatisticalDriftCalculatorArtifact,
     PerformanceEvaluatorArtifact,
-    RuleEngineArtifact,
-    ArtifactPublisherArtifact
+    RuleEngineArtifact
 )
 
 

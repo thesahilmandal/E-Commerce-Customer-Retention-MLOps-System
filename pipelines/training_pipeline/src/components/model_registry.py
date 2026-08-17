@@ -12,10 +12,9 @@ downstream inference and monitoring pipelines to the new model bundle.
 import os
 import sys
 import time
-import json
 import shutil
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict
 
 from pipelines.training_pipeline.src.core.context import PipelineContext
 from pipelines.training_pipeline.src.entity.config_entity import ModelRegistryConfig

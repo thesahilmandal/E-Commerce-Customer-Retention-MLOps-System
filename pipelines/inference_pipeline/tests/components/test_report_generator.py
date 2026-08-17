@@ -2,7 +2,6 @@ import os
 import json
 import pytest
 import pandas as pd
-import numpy as np
 from unittest.mock import patch, MagicMock
 
 from shared_core.exceptions.custom_exception import CustomException

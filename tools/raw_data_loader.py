@@ -1,19 +1,20 @@
 import os
 import tempfile
 from typing import Iterator
-from dotenv import load_dotenv
-
-load_dotenv()
 
 import boto3
+import kagglehub
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import kagglehub
+from dotenv import load_dotenv
 from tqdm import tqdm
 
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
+
+# Execute initialization after imports to satisfy E402
+load_dotenv()
 
 
 class S3StreamingUploader:
@@ -23,7 +24,6 @@ class S3StreamingUploader:
         self.logger = logger
         self.s3_client = boto3.client("s3")
         self.bucket = os.getenv("ML_S3_BUCKET_NAME")
-        
 
     def upload_parquet_stream(
         self,
@@ -95,7 +95,7 @@ class RawDataPipeline:
         self.processor = StreamingCSVProcessor(self.logger)
         self.uploader = S3StreamingUploader(self.logger)
 
-    def _discover_csv_files(self, dataset_path: str):
+    def _discover_csv_files(self, dataset_path: str) -> Iterator[str]:
         for root, _, files in os.walk(dataset_path):
             for file in files:
                 if file.endswith(".csv"):
@@ -118,7 +118,7 @@ class RawDataPipeline:
                         ".csv", ".parquet"
                     )
 
-                    s3_key = f"{os.getenv("S3_RAW_DATA_DIR")}/{file_name}"
+                    s3_key = f"{os.getenv('S3_RAW_DATA_DIR')}/{file_name}"
 
                     self.uploader.upload_parquet_stream(
                         df_iter,

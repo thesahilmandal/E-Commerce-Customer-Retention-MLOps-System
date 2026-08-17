@@ -1,4 +1,3 @@
-import os
 import sys
 import runpy
 from unittest.mock import MagicMock, patch

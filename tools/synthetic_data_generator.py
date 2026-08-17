@@ -311,7 +311,7 @@ class SyntheticDataGenerator:
             logging.info("S3-NATIVE DATA GENERATION COMPLETED SUCCESSFULLY")
             logging.info("===================================================")
 
-        except Exception as e:
+        except Exception:
             logging.critical("Synthetic Data Generator terminated due to an error.", exc_info=True)
             sys.exit(1)
 

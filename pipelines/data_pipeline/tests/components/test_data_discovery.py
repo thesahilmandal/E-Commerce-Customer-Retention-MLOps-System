@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import MagicMock
 
 from pipelines.data_pipeline.src.components.data_discovery import DataDiscovery
 from pipelines.data_pipeline.src.core.context import PipelineContext

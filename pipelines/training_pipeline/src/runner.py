@@ -166,7 +166,7 @@ def main() -> None:
             training_dataset_s3_uri_path=dataset_uri
         )
         sys.exit(0)
-    except Exception as e:
+    except Exception:
         # Exception details are already logged by the TrainingPipeline,
         # but we exit cleanly with a failure code for Docker/orchestrators.
         sys.exit(1)

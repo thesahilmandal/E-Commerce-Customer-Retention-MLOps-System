@@ -2,7 +2,7 @@ import os
 import json
 import shutil
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from shared_core.exceptions.custom_exception import CustomException
 from pipelines.inference_pipeline.src.components.model_loader import ModelLoader

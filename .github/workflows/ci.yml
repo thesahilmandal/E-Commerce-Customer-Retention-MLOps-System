@@ -1,0 +1,43 @@
+name: Continuous Integration (CI)
+
+# Trigger on Pull Requests to main, plus manual trigger for debugging
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  code-quality-and-tests:
+    name: Code Quality & Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12.1
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.1"
+          cache: "pip" # Caches pip dependencies for faster runs
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov ruff
+
+      - name: Run Linter (Ruff)
+        run: |
+          # Check for syntax errors, undefined variables, and style issues
+          ruff check .
+
+      - name: Run Test Suite (Unit & Integration)
+        if: always() # Ensures tests run even if the linter (Ruff) fails
+        run: |
+          # Use python -m to ensure the repository root is properly added to sys.path
+          python -m pytest -v

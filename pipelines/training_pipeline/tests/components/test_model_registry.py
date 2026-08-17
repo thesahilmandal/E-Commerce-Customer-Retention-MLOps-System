@@ -1,7 +1,7 @@
 import os
 import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from pipelines.training_pipeline.src.components.model_registry import ModelRegistry
 from pipelines.training_pipeline.src.entity.config_entity import ModelRegistryConfig
