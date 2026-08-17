@@ -77,7 +77,7 @@ def test_duckdb_pragmas_and_extensions_loaded(
     mock_con = MagicMock()
     monkeypatch.setattr(duckdb, "connect", lambda *args, **kwargs: mock_con)
 
-    context = PipelineContext(
+    PipelineContext(
         run_id="test_run_pragmas",
         start_date="2016-09-01",
         end_date="2016-10-01",

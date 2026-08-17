@@ -1,6 +1,3 @@
-import os
-import sys
-import json
 import yaml
 import joblib
 import pytest
@@ -14,12 +11,6 @@ from xgboost import XGBClassifier
 from pipelines.training_pipeline.src.core.config_parser import ConfigParser
 from pipelines.training_pipeline.src.core.context import PipelineContext
 from pipelines.training_pipeline.src.components.data_processor import CategoricalSchemaEnforcer
-from pipelines.training_pipeline.src.entity.config_entity import (
-    DataProcessorConfig,
-    ModelTrainerConfig,
-    ModelEvaluatorConfig,
-    ModelRegistryConfig,
-)
 
 from pipelines.training_pipeline.src.entity.artifact_entity import (
     DataProcessorArtifact,

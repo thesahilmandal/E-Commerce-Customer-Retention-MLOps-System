@@ -188,7 +188,7 @@ def main() -> None:
             execution_date=execution_date
         ).run()
         sys.exit(0)
-    except Exception as e:
+    except Exception:
         # Exception details are already logged by the MonitoringPipelineRunner
         sys.exit(1)
 
@@ -199,6 +199,6 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     try:
-#         MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-08-11").run()
+#         MonitoringPipelineRunner(run_id="testing_01", execution_date="2026-08-17").run()
 #     except Exception as e:
 #         raise CustomException(e, sys)

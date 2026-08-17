@@ -1,7 +1,7 @@
 import os
 import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from pipelines.monitoring_pipeline.src.components.artifact_publisher import ArtifactPublisher
 from pipelines.monitoring_pipeline.src.entity.config_entity import ArtifactPublisherConfig

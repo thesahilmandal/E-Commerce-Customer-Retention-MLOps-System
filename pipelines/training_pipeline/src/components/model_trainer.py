@@ -8,7 +8,6 @@ and bundles the model with the pre-fitted Categorical Schema Enforcer into a sin
 Scikit-Learn Mega-Pipeline for deployment.
 """
 
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,15 +17,12 @@ import pandas as pd
 import numpy as np
 import joblib
 import optuna
+import shap
+import matplotlib.pyplot as plt
 from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import log_loss
-import shap
-import matplotlib.pyplot as plt
-
-# Ensure matplotlib does not attempt to open GUI windows in headless environments
-plt.switch_backend("Agg")
 
 from pipelines.training_pipeline.src.core.context import PipelineContext
 from pipelines.training_pipeline.src.entity.config_entity import ModelTrainerConfig
@@ -37,6 +33,10 @@ from pipelines.training_pipeline.src.entity.artifact_entity import (
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 from shared_core.utils.main_utils import write_json_file
+
+
+# Ensure matplotlib does not attempt to open GUI windows in headless environments
+plt.switch_backend("Agg")
 
 
 class ModelTrainer:
@@ -193,7 +193,7 @@ class ModelTrainer:
                 )
                 
                 preds = model.predict_proba(X_val)[:, 1]
-                return log_loss(y_val, preds)
+                return float(log_loss(y_val, preds))
 
             study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=self.config.random_state))
             study.optimize(objective, n_trials=self.config.optuna_n_trials)
@@ -311,7 +311,7 @@ class ModelTrainer:
         try:
             logging.info("Calculating reference feature distributions for Monitoring Pipeline.")
             
-            distributions = {}
+            distributions: Dict[str, Any] = {}
             for col in X_train.columns:
                 series = X_train[col]
                 if pd.api.types.is_numeric_dtype(series):

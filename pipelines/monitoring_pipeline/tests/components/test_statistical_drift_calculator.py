@@ -3,11 +3,9 @@ import json
 import pytest
 import numpy as np
 import pandas as pd
-from unittest.mock import patch, MagicMock
 
 from pipelines.monitoring_pipeline.src.components.statistical_drift_calculator import StatisticalDriftCalculator
 from pipelines.monitoring_pipeline.src.entity.config_entity import StatisticalDriftCalculatorConfig
-from shared_core.exceptions.custom_exception import CustomException
 
 
 @pytest.fixture

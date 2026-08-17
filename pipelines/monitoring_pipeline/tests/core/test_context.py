@@ -1,6 +1,7 @@
 import os
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from pipelines.monitoring_pipeline.src.core.context import MonitoringPipelineContext
 from shared_core.exceptions.custom_exception import CustomException
@@ -9,7 +10,9 @@ from shared_core.exceptions.custom_exception import CustomException
 @patch("pipelines.monitoring_pipeline.src.core.context.os.makedirs")
 @patch("pipelines.monitoring_pipeline.src.core.context.read_yaml")
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=True)
-def test_context_initialization_with_explicit_args(mock_exists, mock_read_yaml, mock_makedirs):
+def test_context_initialization_with_explicit_args(
+    _mock_exists: MagicMock, mock_read_yaml: MagicMock, mock_makedirs: MagicMock
+) -> None:
     """
     Validates that providing explicit run_id and execution_date assigns them correctly
     and successfully creates the context root directory.
@@ -39,7 +42,9 @@ def test_context_initialization_with_explicit_args(mock_exists, mock_read_yaml, 
 @patch("pipelines.monitoring_pipeline.src.core.context.os.makedirs")
 @patch("pipelines.monitoring_pipeline.src.core.context.read_yaml")
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=True)
-def test_context_initialization_with_implicit_args(mock_exists, mock_read_yaml, mock_makedirs):
+def test_context_initialization_with_implicit_args(
+    _mock_exists: MagicMock, mock_read_yaml: MagicMock, _mock_makedirs: MagicMock
+) -> None:
     """
     Validates that omitting run_id and execution_date triggers automatic 
     generation of safe, formatted fallback identifiers.
@@ -56,7 +61,7 @@ def test_context_initialization_with_implicit_args(mock_exists, mock_read_yaml, 
 
 
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=False)
-def test_context_missing_config_raises_custom_exception(mock_exists):
+def test_context_missing_config_raises_custom_exception(_mock_exists: MagicMock) -> None:
     """
     Validates that a missing configuration file properly throws a CustomException
     rather than silently failing or raising a raw FileNotFoundError.
@@ -68,7 +73,9 @@ def test_context_missing_config_raises_custom_exception(mock_exists):
 @patch("pipelines.monitoring_pipeline.src.core.context.os.makedirs")
 @patch("pipelines.monitoring_pipeline.src.core.context.read_yaml", return_value=None)
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=True)
-def test_context_empty_config_fallback(mock_exists, mock_read_yaml, mock_makedirs):
+def test_context_empty_config_fallback(
+    _mock_exists: MagicMock, _mock_read_yaml: MagicMock, _mock_makedirs: MagicMock
+) -> None:
     """
     Validates the defensive fix: an empty/null YAML file should evaluate 
     to an empty dictionary, not None.
@@ -82,7 +89,12 @@ def test_context_empty_config_fallback(mock_exists, mock_read_yaml, mock_makedir
 @patch("pipelines.monitoring_pipeline.src.core.context.os.makedirs")
 @patch("pipelines.monitoring_pipeline.src.core.context.read_yaml", return_value={})
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=True)
-def test_context_manager_lifecycle(mock_exists, mock_read_yaml, mock_makedirs, mock_duckdb_connect):
+def test_context_manager_lifecycle(
+    _mock_exists: MagicMock,
+    _mock_read_yaml: MagicMock,
+    _mock_makedirs: MagicMock,
+    mock_duckdb_connect: MagicMock
+) -> None:
     """
     Validates the __enter__ and __exit__ lifecycle of the context manager,
     ensuring DuckDB is initialized with correct extensions and safely closed.
@@ -116,7 +128,12 @@ def test_context_manager_lifecycle(mock_exists, mock_read_yaml, mock_makedirs, m
 @patch("pipelines.monitoring_pipeline.src.core.context.os.makedirs")
 @patch("pipelines.monitoring_pipeline.src.core.context.read_yaml", return_value={})
 @patch("pipelines.monitoring_pipeline.src.core.context.os.path.exists", return_value=True)
-def test_context_manager_exception_teardown(mock_exists, mock_read_yaml, mock_makedirs, mock_duckdb_connect):
+def test_context_manager_exception_teardown(
+    _mock_exists: MagicMock,
+    _mock_read_yaml: MagicMock,
+    _mock_makedirs: MagicMock,
+    mock_duckdb_connect: MagicMock
+) -> None:
     """
     Validates that the DuckDB connection is safely closed even if an exception
     occurs inside the context block.
@@ -127,7 +144,7 @@ def test_context_manager_exception_teardown(mock_exists, mock_read_yaml, mock_ma
     context = MonitoringPipelineContext()
     
     try:
-        with context as ctx:
+        with context:
             raise ValueError("Simulated pipeline failure")
     except ValueError:
         pass
