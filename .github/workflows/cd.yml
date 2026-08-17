@@ -1,0 +1,86 @@
+name: Continuous Deployment (CD) - Build & Push to ECR
+
+# Only trigger this when code is merged/pushed to the main branch
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Required for OIDC
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, Tag, and Push Data Pipeline
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/data-pipeline:$IMAGE_TAG -f pipelines/data_pipeline/Dockerfile .
+          
+          # Push the image to AWS ECR
+          docker push $ECR_REGISTRY/data-pipeline:$IMAGE_TAG
+          
+          echo "Successfully pushed data-pipeline:$IMAGE_TAG"
+
+
+      - name: Build, Tag, and Push Training Pipeline
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/training-pipeline:$IMAGE_TAG -f pipelines/training_pipeline/Dockerfile .
+          
+          # Push the image to AWS ECR
+          docker push $ECR_REGISTRY/training-pipeline:$IMAGE_TAG
+          
+          echo "Successfully pushed training-pipeline:$IMAGE_TAG"
+
+
+      - name: Build, Tag, and Push Inference Pipeline
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG -f pipelines/inference_pipeline/Dockerfile .
+          
+          # Push the image to AWS ECR
+          docker push $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG
+          
+          echo "Successfully pushed inference-pipeline:$IMAGE_TAG"
+
+
+      - name: Build, Tag, and Push Monitoring Pipeline
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG -f pipelines/monitoring_pipeline/Dockerfile .
+          
+          # Push the image to AWS ECR
+          docker push $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG
+          
+          echo "Successfully pushed monitoring-pipeline:$IMAGE_TAG"
