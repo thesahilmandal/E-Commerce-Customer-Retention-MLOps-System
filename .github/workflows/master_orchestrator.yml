@@ -81,12 +81,13 @@ jobs:
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
           docker run --rm \
+            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
             -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
             $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG \
-            --run-id $RUN_ID \
-
+            --run-id $RUN_ID 
+            
   # ==========================================
   # 2. MONITORING PIPELINE
   # ==========================================
@@ -112,6 +113,7 @@ jobs:
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
           docker run --rm \
+            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
             -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
@@ -186,6 +188,7 @@ jobs:
           END_DATE: ${{ needs.initialize.outputs.end_date }}
         run: |
           docker run --rm \
+            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
             -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
@@ -220,6 +223,7 @@ jobs:
           DATASET_URI: "s3://ml-platform-production/feature_store/${{ needs.initialize.outputs.run_id }}/dataset.parquet"
         run: |
           docker run --rm \
+            -v /var/run/secrets/eks.amazonaws.com/serviceaccount:/var/run/secrets/eks.amazonaws.com/serviceaccount \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
             -e AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token \
