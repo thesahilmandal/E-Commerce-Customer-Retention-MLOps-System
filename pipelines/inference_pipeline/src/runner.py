@@ -15,19 +15,19 @@ from pipelines.inference_pipeline.src.components.report_generator import ReportG
 from pipelines.inference_pipeline.src.components.report_publisher import ReportPublisher
 from pipelines.inference_pipeline.src.entity.artifact_entity import ReportPublisherArtifact
 
-
 class InferencePipeline:
     """
     Orchestration entry point for the Inference Pipeline.
 
+    ```
     Responsibilities:
     - Manages the lifecycle of the entire batch inference workflow.
     - Initializes the centralized `InferencePipelineContext`, ensuring secure
-      management of out-of-core DuckDB engines and AWS S3 connections.
+    management of out-of-core DuckDB engines and AWS S3 connections.
     - Coordinates the sequential execution of all pipeline components.
     - Halts execution gracefully if data contracts or validation checks fail.
     - Propagates generated artifacts through the pipeline stages to ensure
-      strict state determinism and lineage tracking.
+    strict state determinism and lineage tracking.
     """
 
     @classmethod
@@ -42,7 +42,7 @@ class InferencePipeline:
 
         Returns:
             ReportPublisherArtifact: The final artifact containing cloud URIs to the
-                                     published reports and master telemetry ledger.
+                                    published reports and master telemetry ledger.
 
         Raises:
             CustomException: If any unrecoverable error occurs during execution.
@@ -134,34 +134,13 @@ class InferencePipeline:
             raise CustomException(e, sys) from e
 
 
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description="Batch Inference Pipeline")
-#     parser.add_argument(
-#         "--run-id", 
-#         type=str, 
-#         required=False, 
-#         help="Unique identifier for the run. Auto-generated if omitted."
-#     )
-
-#     args = parser.parse_args()
-
-#     try:
-#         InferencePipeline.run(run_id=args.run_id)
-#     except Exception:
-#         logging.critical(
-#             "Inference Pipeline execution terminated due to an unrecoverable failure.",
-#             exc_info=True,
-#         )
-#         sys.exit(1)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch Inference Pipeline")
     parser.add_argument(
-        "--run-id", 
-        type=str, 
-        required=False, 
-        help="Unique identifier for the run. Auto-generated if omitted."
+    "--run-id",
+    type=str,
+    required=False,
+    help="Unique identifier for the run. Auto-generated if omitted."
     )
 
     args = parser.parse_args()
@@ -183,11 +162,3 @@ if __name__ == "__main__":
         print(f"❌ PIPELINE FAILED: {str(e)}", file=sys.stderr)
         print("="*60 + "\n", file=sys.stderr)
         sys.exit(1)
-        
-
-# if __name__ == "__main__":
-#     try:
-#         artifact = InferencePipeline.run(run_id="testing_01")
-#         print(artifact)
-#     except Exception as e:
-#         raise CustomException(e, sys)

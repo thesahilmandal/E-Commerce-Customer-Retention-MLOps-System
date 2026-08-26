@@ -6,17 +6,20 @@ from typing import TYPE_CHECKING
 
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Use TYPE_CHECKING to prevent circular imports at runtime while allowing type hints
+
 if TYPE_CHECKING:
     from pipelines.monitoring_pipeline.src.core.context import MonitoringPipelineContext
-
 
 @dataclass(frozen=True)
 class BaselineAndTelemetryResolverConfig:
     """
     Configuration for the Baseline & Telemetry Resolver component.
-    Defines S3 URIs for fetching champion baselines, proactive telemetry, 
+    Defines S3 URIs for fetching champion baselines, proactive telemetry,
     historical reactive telemetry, and matured ground-truth labels.
     """
     resolver_root_dir: str
@@ -58,7 +61,9 @@ class BaselineAndTelemetryResolverConfig:
             current_partition_suffix = f"year={exec_date_obj.year}/month={exec_date_obj.month:02d}/day={exec_date_obj.day:02d}"
             lookback_partition_suffix = f"year={lookback_date_obj.year}/month={lookback_date_obj.month:02d}/day={lookback_date_obj.day:02d}"
 
-            bucket = cloud_storage.get("s3_data_lake_bucket", "company-central-data-lake")
+            yaml_bucket = cloud_storage.get("s3_data_lake_bucket", "company-central-data-lake")
+            bucket = os.getenv("S3_PIPELINE_RUN_ARTIFACTS", yaml_bucket)
+
             s3_registry_pointer = (
                 f"s3://{bucket}/{cloud_storage.get('s3_model_registry_prefix', 'model_registry')}/"
                 f"{cloud_storage.get('s3_model_registry_state_dir', 'state')}/"
@@ -243,10 +248,13 @@ class ArtifactPublisherConfig:
 
             publisher_root_dir = os.path.join(context.root_dir, comp_cfg.get("dir_name", "05_artifact_publisher"))
             os.makedirs(publisher_root_dir, exist_ok=True)
+            
+            yaml_bucket = cloud_storage.get("s3_data_lake_bucket", "company-central-data-lake")
+            bucket = os.getenv("S3_PIPELINE_RUN_ARTIFACTS", yaml_bucket)
 
             instance = cls(
                 publisher_root_dir=publisher_root_dir,
-                s3_bucket_name=cloud_storage.get("s3_data_lake_bucket", "company-central-data-lake"),
+                s3_bucket_name=bucket,
                 s3_monitoring_output_prefix=cloud_storage.get("s3_monitoring_output_prefix", "monitoring_pipeline_artifacts"),
                 s3_audit_reports_dir=cloud_storage.get("s3_monitoring_audit_reports_dir", "audit_reports"),
                 s3_action_tokens_dir=cloud_storage.get("s3_monitoring_action_tokens_dir", "action_tokens"),

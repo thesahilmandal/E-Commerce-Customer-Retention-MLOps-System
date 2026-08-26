@@ -4,7 +4,7 @@ pipeline:
 
 storage:
   bronze_data_lake:
-    base_uri: "s3://company-central-data-lake/bronze"
+    base_uri: "s3://${S3_CUSTOMER_DATABASE}/bronze"
     datasets:
       - name: "orders"
         partition_keys: ["year", "month", "day"]
@@ -14,7 +14,7 @@ storage:
         partition_keys: ["year", "month", "day"]
         
   feature_store:
-    base_uri: "s3://ml-platform-production/feature_store"
+    base_uri: "s3://${S3_PIPELINE_RUN_ARTIFACTS}/feature_store"
     artifact_name: "dataset.parquet"
     metadata_name: "metadata.json"
     export_format: "parquet"

@@ -1,24 +1,30 @@
 import os
 import sys
+import re
 import yaml
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
-
 
 class ConfigParser:
     """
     Configuration Parser for the Training Pipeline.
 
+    ```
     Responsibilities:
+    - Load environment variables from .env (if present) using python-dotenv.
     - Load the centralized pipeline_config.yaml file.
+    - Resolve environment variable interpolations (e.g., ${VAR:-default}) in the YAML.
     - Validate that all required configuration sections are present and properly formatted.
     - Expose structured, strictly-typed configuration dictionaries to the PipelineContext.
     - Handle configuration file missing or parsing errors gracefully.
     """
 
     DEFAULT_CONFIG_PATH = "pipelines/training_pipeline/configs/pipeline_config.yaml"
+    ENV_PATTERN = re.compile(r"\$\{([A-Za-z0-9_]+)(?::-([^}]*))?\}")
 
     def __init__(self, config_filepath: str = DEFAULT_CONFIG_PATH) -> None:
         """
@@ -28,6 +34,9 @@ class ConfigParser:
             config_filepath (str): Path to the YAML configuration file.
         """
         try:
+            # Load environment variables from .env file into os.environ (fails silently if missing)
+            load_dotenv()
+
             self.config_filepath = config_filepath
             self.config_data = self._read_yaml()
             self._validate_config()
@@ -37,9 +46,27 @@ class ConfigParser:
             logging.exception("Failed to initialize ConfigParser.")
             raise CustomException(e, sys) from e
 
+    def _resolve_env_vars(self, content: str) -> str:
+        """
+        Resolves bash-style environment variable interpolations in the configuration string.
+        Supports both ${VAR_NAME} and${VAR_NAME:-default_value} syntax.
+        """
+        def replacer(match: re.Match) -> str:
+            env_var = match.group(1)
+            default_val = match.group(2)
+            
+            if env_var in os.environ:
+                return os.environ[env_var]
+            elif default_val is not None:
+                return default_val
+            else:
+                return ""
+                
+        return self.ENV_PATTERN.sub(replacer, content)
+
     def _read_yaml(self) -> Dict[str, Any]:
         """
-        Safely reads the YAML configuration file.
+        Safely reads the YAML configuration file and resolves environment variables.
 
         Returns:
             Dict[str, Any]: The parsed configuration dictionary.
@@ -55,7 +82,10 @@ class ConfigParser:
                 raise FileNotFoundError(f"Configuration file not found at: {self.config_filepath}")
 
             with open(self.config_filepath, "r") as file:
-                config = yaml.safe_load(file)
+                raw_content = file.read()
+
+            resolved_content = self._resolve_env_vars(raw_content)
+            config = yaml.safe_load(resolved_content)
 
             # Ensure the file wasn't completely empty and parsed as a valid dictionary
             if not config or not isinstance(config, dict):

@@ -4,17 +4,18 @@ import shutil
 from typing import Dict
 
 import duckdb
+from dotenv import load_dotenv
 
 from shared_core.cloud.s3_operations import S3Sync
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
-
 class HivePartitionGenerator:
     """
-    Utility script to transform flat raw Olist datasets into structured, 
+    Utility script to transform flat raw Olist datasets into structured,
     temporally partitioned datasets (year/month/day) within the Bronze Data Lake.
 
+    ```
     Leverages S3Sync for robust AWS network I/O and DuckDB for high-performance 
     relational joins, extracting the temporal ingestion boundaries from the 
     orders table to uniformly partition all dependent entities.
@@ -25,7 +26,17 @@ class HivePartitionGenerator:
         Initializes the Hive Partition Generator.
         """
         try:
+            load_dotenv()
             logging.info("Initializing HivePartitionGenerator.")
+            
+            self.raw_bucket = os.environ.get("S3_PIPELINE_RUN_ARTIFACTS")
+            self.bronze_bucket = os.environ.get("S3_CUSTOMER_DATABASE")
+            
+            if not self.raw_bucket:
+                raise ValueError("FEATURE_STORE_BUCKET environment variable is not set.")
+            if not self.bronze_bucket:
+                raise ValueError("BRONZE_DATA_LAKE_BUCKET environment variable is not set.")
+
             self.s3_sync = S3Sync()
             self.con = duckdb.connect(database=":memory:")
             
@@ -64,41 +75,41 @@ class HivePartitionGenerator:
 
             # 1. Download raw datasets locally to facilitate cross-table temporal joins
             logging.info("Downloading raw Olist datasets from S3...")
-            self.s3_sync.download_file("s3://ml-platform-production/raw_data/olist_orders_dataset.parquet", local_raw_orders)
-            self.s3_sync.download_file("s3://ml-platform-production/raw_data/olist_customers_dataset.parquet", local_raw_customers)
-            self.s3_sync.download_file("s3://ml-platform-production/raw_data/olist_order_payments_dataset.parquet", local_raw_payments)
+            self.s3_sync.download_file(f"s3://{self.raw_bucket}/raw_data/olist_orders_dataset.parquet", local_raw_orders)
+            self.s3_sync.download_file(f"s3://{self.raw_bucket}/raw_data/olist_customers_dataset.parquet", local_raw_customers)
+            self.s3_sync.download_file(f"s3://{self.raw_bucket}/raw_data/olist_order_payments_dataset.parquet", local_raw_payments)
 
             # 2. Define configurations to inject year/month/day boundaries uniformly
             dataset_configs: Dict[str, Dict[str, str]] = {
                 "orders": {
-                    "destination": "s3://company-central-data-lake/bronze/orders",
+                    "destination": f"s3://{self.bronze_bucket}/bronze/orders",
                     "select_query": f"""
                         SELECT *, 
-                               strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
-                               strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
-                               strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%d') AS day
+                            strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
+                            strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
+                            strftime(CAST(order_purchase_timestamp AS TIMESTAMP), '%d') AS day
                         FROM read_parquet('{local_raw_orders}')
                     """
                 },
                 "customers": {
-                    "destination": "s3://company-central-data-lake/bronze/customers",
+                    "destination": f"s3://{self.bronze_bucket}/bronze/customers",
                     "select_query": f"""
                         SELECT c.*, 
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%d') AS day
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%d') AS day
                         FROM read_parquet('{local_raw_customers}') AS c
                         INNER JOIN read_parquet('{local_raw_orders}') AS o 
                             ON c.customer_id = o.customer_id
                     """
                 },
                 "order_payments": {
-                    "destination": "s3://company-central-data-lake/bronze/order_payments",
+                    "destination": f"s3://{self.bronze_bucket}/bronze/order_payments",
                     "select_query": f"""
                         SELECT p.*, 
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
-                               strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%d') AS day
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%Y') AS year, 
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%m') AS month,
+                            strftime(CAST(o.order_purchase_timestamp AS TIMESTAMP), '%d') AS day
                         FROM read_parquet('{local_raw_payments}') AS p
                         INNER JOIN read_parquet('{local_raw_orders}') AS o 
                             ON p.order_id = o.order_id

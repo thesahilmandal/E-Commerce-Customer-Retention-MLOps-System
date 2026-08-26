@@ -1,13 +1,14 @@
 """
 Configuration Parser Module.
 
-This module is responsible for loading, parsing, and validating the centralized 
+This module is responsible for loading, parsing, and validating the centralized
 YAML configuration file (pipeline_config.yaml) for the Data Pipeline.
-It maps the raw YAML structure into strongly-typed, immutable Data Classes 
+It maps the raw YAML structure into strongly-typed, immutable Data Classes
 to ensure type safety and configuration integrity throughout the pipeline's execution.
 """
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -16,7 +17,6 @@ import yaml
 
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
-
 
 # ==========================================================
 # CONFIGURATION DATA CLASSES
@@ -28,20 +28,17 @@ class PipelineInfoConfig:
     name: str
     version: str
 
-
 @dataclass(frozen=True)
 class DatasetConfig:
     """Configuration for an individual dataset in the Bronze Data Lake."""
     name: str
     partition_keys: List[str]
 
-
 @dataclass(frozen=True)
 class BronzeDataLakeConfig:
     """Configuration for the S3 Bronze Data Lake."""
     base_uri: str
     datasets: List[DatasetConfig]
-
 
 @dataclass(frozen=True)
 class FeatureStoreConfig:
@@ -52,13 +49,11 @@ class FeatureStoreConfig:
     export_format: str
     export_compression: str
 
-
 @dataclass(frozen=True)
 class StorageConfig:
     """Aggregated storage configurations."""
     bronze_data_lake: BronzeDataLakeConfig
     feature_store: FeatureStoreConfig
-
 
 @dataclass(frozen=True)
 class HardwareConfig:
@@ -66,13 +61,11 @@ class HardwareConfig:
     threads: int
     memory_limit: str
 
-
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Runtime environment settings for compute."""
     temp_directory: str
     extensions: List[str]
-
 
 @dataclass(frozen=True)
 class ComputeConfig:
@@ -81,7 +74,6 @@ class ComputeConfig:
     hardware: HardwareConfig
     runtime: RuntimeConfig
 
-
 @dataclass(frozen=True)
 class TargetDefinitionConfig:
     """Business logic configuration for target variables."""
@@ -89,20 +81,17 @@ class TargetDefinitionConfig:
     churn_column_name: str
     ltv_column_name: str
 
-
 @dataclass(frozen=True)
 class CohortDefinitionConfig:
     """Business logic configuration for cohort selection."""
     minimum_orders: int
     active_status_codes: List[str]
 
-
 @dataclass(frozen=True)
 class BusinessLogicConfig:
     """Aggregated business logic configurations."""
     target_definition: TargetDefinitionConfig
     cohort_definition: CohortDefinitionConfig
-
 
 @dataclass(frozen=True)
 class ValidationConfig:
@@ -111,7 +100,6 @@ class ValidationConfig:
     enable_null_checks: bool
     strict_mode: bool
     fail_fast: bool
-
 
 @dataclass(frozen=True)
 class DataPipelineConfig:
@@ -122,7 +110,6 @@ class DataPipelineConfig:
     business_logic: BusinessLogicConfig
     validation: ValidationConfig
 
-
 # ==========================================================
 # CONFIGURATION PARSER
 # ==========================================================
@@ -131,8 +118,10 @@ class PipelineConfigParser:
     """
     Parses the centralized YAML configuration into strongly-typed Data Classes.
 
+    ```
     Responsibilities:
     - Safely read the YAML configuration file from the filesystem.
+    - Resolve environment variables explicitly referenced in the YAML via ${VAR_NAME}.
     - Validate the presence of all required configuration blocks.
     - Instantiate and return an immutable DataPipelineConfig object.
     """
@@ -147,6 +136,30 @@ class PipelineConfigParser:
         self.config_file_path = config_file_path
         logging.info("PipelineConfigParser initialized for path: %s", self.config_file_path)
 
+    def _resolve_env_vars(self, content: str) -> str:
+        """
+        Resolves ${ENV_VAR} patterns in the configuration text.
+        
+        Args:
+            content (str): The raw YAML string content.
+            
+        Returns:
+            str: The YAML string with environment variables interpolated.
+            
+        Raises:
+            ValueError: If a required environment variable is missing.
+        """
+        pattern = re.compile(r"\$\{([^}]+)\}")
+        
+        def replacer(match: re.Match) -> str:
+            var_name = match.group(1)
+            val = os.environ.get(var_name)
+            if val is None:
+                raise ValueError(f"Required environment variable '{var_name}' is not set.")
+            return val
+            
+        return pattern.sub(replacer, content)
+
     def _read_yaml(self) -> Dict[str, Any]:
         """
         Reads and parses the YAML file into a Python dictionary.
@@ -155,7 +168,7 @@ class PipelineConfigParser:
             Dict[str, Any]: The parsed YAML structure.
 
         Raises:
-            CustomException: If the file does not exist or contains invalid YAML.
+            CustomException: If the file does not exist, misses variables, or contains invalid YAML.
         """
         if not os.path.exists(self.config_file_path):
             error_msg = f"Configuration file not found at: {self.config_file_path}"
@@ -164,7 +177,10 @@ class PipelineConfigParser:
 
         try:
             with open(self.config_file_path, "r", encoding="utf-8") as file:
-                parsed_yaml = yaml.safe_load(file)
+                raw_content = file.read()
+                
+            expanded_content = self._resolve_env_vars(raw_content)
+            parsed_yaml = yaml.safe_load(expanded_content)
 
             if not parsed_yaml:
                 raise ValueError(f"Configuration file {self.config_file_path} is empty.")

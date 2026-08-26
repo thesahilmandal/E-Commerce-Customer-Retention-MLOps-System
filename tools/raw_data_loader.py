@@ -23,7 +23,7 @@ class S3StreamingUploader:
     def __init__(self, logger):
         self.logger = logger
         self.s3_client = boto3.client("s3")
-        self.bucket = os.getenv("ML_S3_BUCKET_NAME")
+        self.bucket = os.getenv("S3_PIPELINE_RUN_ARTIFACTS")
 
     def upload_parquet_stream(
         self,
@@ -118,7 +118,7 @@ class RawDataPipeline:
                         ".csv", ".parquet"
                     )
 
-                    s3_key = f"{os.getenv('S3_RAW_DATA_DIR')}/{file_name}"
+                    s3_key = f"raw_data/{file_name}"
 
                     self.uploader.upload_parquet_stream(
                         df_iter,

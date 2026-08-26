@@ -1,13 +1,3 @@
-"""
-Runner Module for the Training Pipeline.
-
-This module provides the main orchestrator for the Training Pipeline.
-It defines the `TrainingPipeline` class and its `run` method, which is responsible
-for managing the execution lifecycle, initializing the Dependency Injection container
-(PipelineContext), and executing the Directed Acyclic Graph (DAG) of pipeline components.
-It provides a robust CLI interface suitable for execution via Docker ENTRYPOINT.
-"""
-
 import sys
 import argparse
 
@@ -122,6 +112,7 @@ class TrainingPipeline:
         except Exception as e:
             logging.exception("Training Pipeline execution failed critically.")
             raise CustomException(e, sys) from e
+
 
 def main() -> None:
     """

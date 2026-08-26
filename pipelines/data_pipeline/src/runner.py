@@ -1,10 +1,10 @@
 """
 Data Pipeline Orchestration Runner.
 
-This module serves as the primary entry point and orchestrator for the 
-Continual Learning Data Pipeline. It loads the pipeline configuration, 
-initializes the runtime execution context (PipelineContext), and sequentially 
-executes the stateless pipeline components (Data Discovery, Data Validation, 
+This module serves as the primary entry point and orchestrator for the
+Continual Learning Data Pipeline. It loads the pipeline configuration,
+initializes the runtime execution context (PipelineContext), and sequentially
+executes the stateless pipeline components (Data Discovery, Data Validation,
 Feature Materialization, Metadata Registry) within a single, managed lifecycle.
 """
 
@@ -13,6 +13,8 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
+
+from dotenv import load_dotenv
 
 from pipelines.data_pipeline.src.components.data_discovery import DataDiscovery
 from pipelines.data_pipeline.src.components.data_validation import DataValidation
@@ -24,11 +26,9 @@ from shared_core.cloud.s3_operations import S3Sync
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
 
-
 DEFAULT_CONFIG_PATH = os.path.join(
-    "pipelines", "data_pipeline", "configs", "pipeline_config.yaml"
+"pipelines", "data_pipeline", "configs", "pipeline_config.yaml"
 )
-
 
 class DataPipeline:
     """
@@ -43,6 +43,9 @@ class DataPipeline:
         end_date: Optional[str] = None,
         config_path: str = DEFAULT_CONFIG_PATH,
     ) -> None:
+        # Load environment variables from .env file if it exists (e.g., for local development)
+        load_dotenv()
+
         if not run_id:
             run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
@@ -119,7 +122,7 @@ if __name__ == "__main__":
             exc_info=True,
         )
         sys.exit(1)
-        
+
 
 # if __name__ == "__main__":
 #     try:

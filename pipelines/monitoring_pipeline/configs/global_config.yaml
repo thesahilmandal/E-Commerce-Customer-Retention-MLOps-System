@@ -8,7 +8,7 @@ data_schema:
   prediction_column: "predicted_probability"
 
 cloud_storage:
-  s3_data_lake_bucket: "ml-platform-production"
+  s3_data_lake_bucket: "REPLACE_WITH_YOUR_BUCKET_NAME"
   s3_bronze_layer_prefix: "bronze"
   s3_model_registry_prefix: "model_registry"
   s3_model_registry_state_dir: "state"

@@ -9,12 +9,12 @@ rolling-window feature engineering) and streams data directly to an Amazon S3 Da
 using strict Hive-style partitioning (year/month/day).
 
 Requirements:
-    pip install pandas pyarrow s3fs python-dotenv
+pip install pandas pyarrow s3fs python-dotenv
 
 Usage:
-    python synthetic_data_generator.py
-    # Or override the target date:
-    python synthetic_data_generator.py --target-date 2026-06-11
+python synthetic_data_generator.py
+# Or override the target date:
+python synthetic_data_generator.py --target-date 2026-06-11
 """
 
 import argparse
@@ -33,19 +33,13 @@ import s3fs
 from dotenv import load_dotenv
 
 # Load AWS Credentials securely from .env file
+
 load_dotenv()
 
 # Fallback for custom logging/exceptions if running outside the main project tree
-try:
-    from shared_core.exceptions.custom_exception import CustomException
-    from shared_core.logging.custom_logging import logging
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s")
 
-    class CustomException(Exception):
-        """Fallback custom exception."""
-        pass
+from shared_core.exceptions.custom_exception import CustomException
+from shared_core.logging.custom_logging import logging
 
 
 class SyntheticDataGeneratorConfig:
@@ -59,7 +53,7 @@ class SyntheticDataGeneratorConfig:
         target_date_str: Optional[str] = None,
         num_customers: int = 1000,
         num_orders: int = 1500,
-        output_base_dir: str = "s3://company-central-data-lake/bronze",
+        output_base_dir: Optional[str] = None,
     ) -> None:
         """
         Initializes configuration, automatically defaulting to T-1 (yesterday) if no date is provided.
@@ -76,14 +70,19 @@ class SyntheticDataGeneratorConfig:
             self.num_customers = num_customers
             self.num_orders = num_orders
 
-            if not output_base_dir.startswith("s3://"):
-                raise ValueError(f"output_base_dir must start with 's3://'. Got: {output_base_dir}")
-            
-            self.output_base_dir = output_base_dir.rstrip("/")
-            self.states = ["SP", "RJ", "MG", "RS", "PR", "SC", "BA", "CE", "PE", "DF"]
+            if output_base_dir:
+                base_dir = output_base_dir
+            else:
+                bronze_bucket = os.environ.get("S3_CUSTOMER_DATABASE")
+                if not bronze_bucket:
+                    raise ValueError("S3_CUSTOMER_DATABASE environment variable is not set and --s3-output-dir was not provided.")
+                base_dir = f"s3://{bronze_bucket}/bronze"
 
-            if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
-                logging.warning("AWS credentials missing from environment. s3fs will attempt IAM Role fallback.")
+            if not base_dir.startswith("s3://"):
+                raise ValueError(f"output_base_dir must start with 's3://'. Got: {base_dir}")
+            
+            self.output_base_dir = base_dir.rstrip("/")
+            self.states = ["SP", "RJ", "MG", "RS", "PR", "SC", "BA", "CE", "PE", "DF"]
 
         except Exception as e:
             logging.exception("Failed to initialize SyntheticDataGeneratorConfig.")
@@ -318,31 +317,31 @@ class SyntheticDataGenerator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate daily synthetic transaction data to AWS S3 for ML pipeline testing. Defaults to T-1."
+    description="Generate daily synthetic transaction data to AWS S3 for ML pipeline testing. Defaults to T-1."
     )
     parser.add_argument(
-        "--target-date",
-        type=str,
-        default=None,
-        help="Optional anchor date for execution (YYYY-MM-DD). If omitted, defaults to Yesterday (T-1).",
+    "--target-date",
+    type=str,
+    default=None,
+    help="Optional anchor date for execution (YYYY-MM-DD). If omitted, defaults to Yesterday (T-1).",
     )
     parser.add_argument(
-        "--num-customers",
-        type=int,
-        default=1000,
-        help="Number of unique global customers to simulate from the stable pool.",
+    "--num-customers",
+    type=int,
+    default=1000,
+    help="Number of unique global customers to simulate from the stable pool.",
     )
     parser.add_argument(
-        "--num-orders",
-        type=int,
-        default=1500,
-        help="Number of total orders to simulate for the target date.",
+    "--num-orders",
+    type=int,
+    default=1500,
+    help="Number of total orders to simulate for the target date.",
     )
     parser.add_argument(
-        "--s3-output-dir",
-        type=str,
-        default="s3://company-central-data-lake/bronze",
-        help="S3 root directory for output Parquet files.",
+    "--s3-output-dir",
+    type=str,
+    default=None,
+    help="Optional S3 root directory for output Parquet files. Defaults to s3://${BRONZE_DATA_LAKE_BUCKET}/bronze via .env.",
     )
 
     args = parser.parse_args()

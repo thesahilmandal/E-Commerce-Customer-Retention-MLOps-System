@@ -19,11 +19,11 @@ business_logic:
 
 cloud_storage:
   data_lake:
-    database_name: "company-central-data-lake"
+    database_name: "${S3_CUSTOMER_DATABASE}"
     bronze_dir: "bronze"
   
   model_registry:
-    bucket_name: "ml-platform-production"
+    bucket_name: "${S3_PIPELINE_RUN_ARTIFACTS}"
     registry_dir: "model_registry"
     state_dir: "state"
     pointer_file: "model_state.json"
