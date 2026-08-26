@@ -4,7 +4,7 @@ name: Continuous Deployment (CD) - Build & Push to ECR
 on:
   push:
     branches:
-      - test-cd-workflow
+      - main
   workflow_dispatch:
 
 permissions:
