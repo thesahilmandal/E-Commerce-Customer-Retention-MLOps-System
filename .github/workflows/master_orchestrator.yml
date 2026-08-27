@@ -77,6 +77,7 @@ jobs:
       - name: Execute Inference Container
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPO_NAME: ${{ vars.ECR_INFERENCE_PIPELINE }}
           RUN_ID: ${{ needs.initialize.outputs.run_id }}
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
@@ -86,7 +87,9 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
             -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG \
+            -e S3_CUSTOMER_DATABASE=${{ vars.S3_CUSTOMER_DATABASE }} \
+            -e S3_PIPELINE_RUN_ARTIFACTS=${{ vars.S3_PIPELINE_RUN_ARTIFACTS }} \
+            $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG \
             --run-id $RUN_ID
 
   # ==========================================
@@ -110,6 +113,7 @@ jobs:
       - name: Execute Monitoring Container
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPO_NAME: ${{ vars.ECR_MONITORING_PIPELINE }}
           RUN_ID: ${{ needs.initialize.outputs.run_id }}
           EXEC_DATE: ${{ needs.initialize.outputs.exec_date }}
         run: |
@@ -119,7 +123,8 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
             -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG \
+            -e S3_PIPELINE_RUN_ARTIFACTS=${{ vars.S3_PIPELINE_RUN_ARTIFACTS }} \
+            $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG \
             --run-id $RUN_ID \
             --execution-date $EXEC_DATE
 
@@ -145,7 +150,7 @@ jobs:
           RUN_ID: ${{ needs.initialize.outputs.run_id }}
           HIVE_PATH: ${{ needs.initialize.outputs.hive_path }}
         run: |
-          S3_URI="s3://ml-platform-production/monitoring_pipeline_artifacts/action_tokens/$HIVE_PATH/need_update_$RUN_ID.json"
+          S3_URI="s3://${{ vars.S3_PIPELINE_RUN_ARTIFACTS }}/monitoring_pipeline_artifacts/action_tokens/$HIVE_PATH/need_update_$RUN_ID.json"
           
           # Explicitly check if the artifact exists to prevent false positives
           if aws s3 ls "$S3_URI" > /dev/null 2>&1; then
@@ -185,6 +190,7 @@ jobs:
       - name: Execute Data Container
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPO_NAME: ${{ vars.ECR_DATA_PIPELINE }}
           RUN_ID: ${{ needs.initialize.outputs.run_id }}
           START_DATE: ${{ needs.initialize.outputs.start_date }}
           END_DATE: ${{ needs.initialize.outputs.end_date }}
@@ -195,7 +201,9 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
             -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            $ECR_REGISTRY/data-pipeline:$IMAGE_TAG \
+            -e S3_PIPELINE_RUN_ARTIFACTS=${{ vars.S3_PIPELINE_RUN_ARTIFACTS }} \
+            -e S3_CUSTOMER_DATABASE=${{ vars.S3_CUSTOMER_DATABASE }} \
+            $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG \
             --run-id $RUN_ID \
             --start-date $START_DATE \
             --end-date $END_DATE
@@ -222,8 +230,9 @@ jobs:
       - name: Execute Training Container
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPO_NAME: ${{ vars.ECR_TRAINING_PIPELINE }}
           RUN_ID: ${{ needs.initialize.outputs.run_id }}
-          DATASET_URI: "s3://ml-platform-production/feature_store/${{ needs.initialize.outputs.run_id }}/dataset.parquet"
+          DATASET_URI: "s3://${{ vars.S3_PIPELINE_RUN_ARTIFACTS }}/feature_store/${{ needs.initialize.outputs.run_id }}/dataset.parquet"
         run: |
           docker run --rm \
             -e AWS_REGION=${{ vars.AWS_REGION }} \
@@ -231,6 +240,7 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
             -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
             -e AWS_ROLE_ARN=${{ vars.AWS_ROLE_ARN }} \
-            $ECR_REGISTRY/training-pipeline:$IMAGE_TAG \
+            -e S3_PIPELINE_RUN_ARTIFACTS=${{ vars.S3_PIPELINE_RUN_ARTIFACTS }} \
+            $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG \
             --run-id $RUN_ID \
             --training-dataset-s3-uri-path $DATASET_URI
