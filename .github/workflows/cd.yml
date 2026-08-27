@@ -34,53 +34,38 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          REPO_NAME: ${{ vars.ECR_DATA_PIPELINE }}
         run: |
-          # Build the Docker image
-          docker build -t $ECR_REGISTRY/data-pipeline:$IMAGE_TAG -f pipelines/data_pipeline/Dockerfile .
-          
-          # Push the image to AWS ECR
-          docker push $ECR_REGISTRY/data-pipeline:$IMAGE_TAG
-          
-          echo "Successfully pushed data-pipeline:$IMAGE_TAG"
-
+          docker build -t $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG -f pipelines/data_pipeline/Dockerfile .
+          docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+          echo "Successfully pushed $REPO_NAME:$IMAGE_TAG"
 
       - name: Build, Tag, and Push Training Pipeline
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          REPO_NAME: ${{ vars.ECR_TRAINING_PIPELINE }}
         run: |
-          # Build the Docker image
-          docker build -t $ECR_REGISTRY/training-pipeline:$IMAGE_TAG -f pipelines/training_pipeline/Dockerfile .
-          
-          # Push the image to AWS ECR
-          docker push $ECR_REGISTRY/training-pipeline:$IMAGE_TAG
-          
-          echo "Successfully pushed training-pipeline:$IMAGE_TAG"
-
+          docker build -t $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG -f pipelines/training_pipeline/Dockerfile .
+          docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+          echo "Successfully pushed $REPO_NAME:$IMAGE_TAG"
 
       - name: Build, Tag, and Push Inference Pipeline
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          REPO_NAME: ${{ vars.ECR_INFERENCE_PIPELINE }}
         run: |
-          # Build the Docker image
-          docker build -t $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG -f pipelines/inference_pipeline/Dockerfile .
-          
-          # Push the image to AWS ECR
-          docker push $ECR_REGISTRY/inference-pipeline:$IMAGE_TAG
-          
-          echo "Successfully pushed inference-pipeline:$IMAGE_TAG"
-
+          docker build -t $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG -f pipelines/inference_pipeline/Dockerfile .
+          docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+          echo "Successfully pushed $REPO_NAME:$IMAGE_TAG"
 
       - name: Build, Tag, and Push Monitoring Pipeline
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          REPO_NAME: ${{ vars.ECR_MONITORING_PIPELINE }}
         run: |
-          # Build the Docker image
-          docker build -t $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG -f pipelines/monitoring_pipeline/Dockerfile .
-          
-          # Push the image to AWS ECR
-          docker push $ECR_REGISTRY/monitoring-pipeline:$IMAGE_TAG
-          
-          echo "Successfully pushed monitoring-pipeline:$IMAGE_TAG"
+          docker build -t $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG -f pipelines/monitoring_pipeline/Dockerfile .
+          docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+          echo "Successfully pushed $REPO_NAME:$IMAGE_TAG"
