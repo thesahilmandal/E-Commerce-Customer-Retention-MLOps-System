@@ -1,273 +1,318 @@
 import os
-import json
+from dataclasses import replace
+from unittest.mock import MagicMock, mock_open, patch
+
 import pytest
-from unittest.mock import patch
 
 from pipelines.training_pipeline.src.components.model_registry import ModelRegistry
-from pipelines.training_pipeline.src.entity.config_entity import ModelRegistryConfig
-from pipelines.training_pipeline.src.entity.artifact_entity import ModelEvaluatorArtifact
+from pipelines.training_pipeline.src.entity.artifact_entity import (
+    DataProcessorArtifact,
+    ModelEvaluatorArtifact,
+    ModelTrainerArtifact,
+)
+from pipelines.training_pipeline.src.entity.config_entity import (
+    ModelRegistryConfig,
+)
 from shared_core.exceptions.custom_exception import CustomException
 
 
 @pytest.fixture
-def registry_config(pipeline_context):
-    return ModelRegistryConfig.from_context(pipeline_context)
+def mr_config(
+    mock_pipeline_context: MagicMock,
+) -> ModelRegistryConfig:
+    return ModelRegistryConfig.from_context(mock_pipeline_context)
 
 
-def test_model_registry_initialization(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
-    registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
-    )
-
-    assert registry.config == registry_config
-    assert registry.context == pipeline_context
-    assert registry.data_artifact == data_processor_artifact
-    assert registry.trainer_artifact == model_trainer_artifact
-    assert registry.evaluator_artifact == model_evaluator_artifact
-
-
-def test_model_registry_rejected_gatekeeper(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
-    # Simulate a rejection from the Model Evaluator
-    rejected_evaluator_artifact = ModelEvaluatorArtifact(
+def test_run_gatekeeper_denied(
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
+    rejected_evaluator = replace(
+        dummy_model_evaluator_artifact,
         approval_status=False,
-        report_file_path=model_evaluator_artifact.report_file_path,
-        baseline_performance_metrics_file_path=model_evaluator_artifact.baseline_performance_metrics_file_path,
-        metadata_file_path=model_evaluator_artifact.metadata_file_path,
     )
 
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=rejected_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=rejected_evaluator,
     )
 
-    artifact = registry.run()
+    with patch.object(registry, "_stage_artifacts") as mock_stage:
+        artifact = registry.run()
 
-    # The registry should short-circuit and return deployment_status=False
-    assert artifact.deployment_status is False
-    assert artifact.s3_model_uri == ""
-
-    # S3 sync should not have been called
-    pipeline_context.s3_sync.sync_folder_to_s3.assert_not_called()
-    pipeline_context.s3_sync.upload_file.assert_not_called()
+        assert artifact.deployment_status is False
+        assert artifact.s3_model_uri == ""
+        assert artifact.metadata_file_path == mr_config.metadata_file_path
+        mock_stage.assert_not_called()
 
 
-def test_model_registry_stage_artifacts(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.os.makedirs"
+)
+def test_run_success_approved(
+    mock_makedirs: MagicMock,
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
     )
 
-    os.makedirs(registry.config.staging_dir, exist_ok=True)
+    expected_s3_uri = (
+        f"{mr_config.s3_models_dir_uri}/"
+        f"{mock_pipeline_context.run_id}"
+    )
+
+    with (
+        patch.object(
+            registry,
+            "_stage_artifacts",
+            return_value={"model.pkl": "/tmp/model.pkl"},
+        ),
+        patch.object(registry, "_generate_requirements"),
+        patch.object(registry, "_generate_deployment_metadata"),
+        patch.object(
+            registry,
+            "_execute_two_phase_commit",
+            return_value=expected_s3_uri,
+        ),
+        patch.object(registry, "_generate_component_metadata"),
+    ):
+        artifact = registry.run()
+
+        assert artifact.deployment_status is True
+        assert artifact.s3_model_uri == expected_s3_uri
+        assert artifact.metadata_file_path == mr_config.metadata_file_path
+
+        mock_makedirs.assert_called_once_with(
+            mr_config.staging_dir,
+            exist_ok=True,
+        )
+
+
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.shutil.copy2"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.os.path.exists"
+)
+def test_stage_artifacts(
+    mock_exists: MagicMock,
+    mock_copy2: MagicMock,
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
+    registry = ModelRegistry(
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
+    )
+
+    # Simulate some files exist, some do not
+    def side_effect_exists(path: str) -> bool:
+        if "model.pkl" in path or "schema.json" in path:
+            return True
+        return False
+
+    mock_exists.side_effect = side_effect_exists
+
     staged_files = registry._stage_artifacts()
 
-    # Verify all expected artifacts were mapped and copied
-    expected_filenames = [
-        "model.pkl",
-        "schema.json",
-        "reference_feature_distributions.json",
-        "baseline_performance_metrics.json",
-        "evaluation_report.json",
-        "shap_summary.png",
-        "shap_feature_importance.json",
-    ]
+    assert "model.pkl" in staged_files
+    assert "schema.json" in staged_files
+    assert "evaluation_report.json" not in staged_files
 
-    for filename in expected_filenames:
-        assert filename in staged_files
-        assert os.path.exists(staged_files[filename])
+    assert mock_copy2.call_count == 2
+
+    mock_copy2.assert_any_call(
+        dummy_model_trainer_artifact.model_file_path,
+        os.path.join(
+            mr_config.staging_dir,
+            "model.pkl",
+        ),
+    )
 
 
-def test_model_registry_generate_requirements(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
+def test_generate_requirements(
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
     )
 
-    os.makedirs(registry.config.staging_dir, exist_ok=True)
-    registry._generate_requirements()
+    m_open = mock_open()
 
-    req_path = os.path.join(
-        registry.config.staging_dir, "requirements.txt"
+    with patch("builtins.open", m_open):
+        registry._generate_requirements()
+
+    m_open.assert_called_once_with(
+        os.path.join(
+            mr_config.staging_dir,
+            "requirements.txt",
+        ),
+        "w",
     )
-    assert os.path.exists(req_path)
 
-    with open(req_path, "r") as f:
-        content = f.read()
+    handle = m_open()
+    written_content = handle.write.call_args[0][0]
 
-    assert "xgboost" in content
-    assert "scikit-learn" in content
-    assert "pandas" in content
-    assert "pyarrow" in content
+    assert "scikit-learn" in written_content
+    assert "xgboost" in written_content
+    assert "pandas" in written_content
+    assert "numpy" in written_content
 
 
-def test_model_registry_generate_deployment_metadata(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.write_json_file"
+)
+def test_generate_deployment_metadata(
+    mock_write_json: MagicMock,
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
     )
 
-    os.makedirs(registry.config.staging_dir, exist_ok=True)
     registry._generate_deployment_metadata()
 
-    meta_path = os.path.join(
-        registry.config.staging_dir,
+    mock_write_json.assert_called_once()
+
+    args = mock_write_json.call_args[0]
+
+    assert args[0] == os.path.join(
+        mr_config.staging_dir,
         "deployment_metadata.json",
     )
-    assert os.path.exists(meta_path)
 
-    with open(meta_path, "r") as f:
-        metadata = json.load(f)
+    payload = args[1]
 
-    assert metadata["run_id"] == pipeline_context.run_id
-    assert metadata["environment"] == registry_config.deployment_environment
+    assert payload["run_id"] == mock_pipeline_context.run_id
+    assert payload["environment"] == mr_config.deployment_environment
     assert (
-        metadata["lineage"]["training_dataset_s3_uri"]
-        == pipeline_context.training_dataset_s3_uri_path
+        payload["lineage"]["training_dataset_s3_uri"]
+        == mock_pipeline_context.training_dataset_s3_uri_path
     )
+    assert "deployed_at_utc" in payload
 
 
-def test_model_registry_two_phase_commit(
-    pipeline_context, registry_config, data_processor_artifact, model_trainer_artifact, model_evaluator_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.os.remove"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.model_registry.write_json_file"
+)
+def test_execute_two_phase_commit(
+    mock_write_json: MagicMock,
+    mock_remove: MagicMock,
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
     )
 
-    staged_files = {"model.pkl": "dummy/path"}
+    staged_files = {
+        "model.pkl": "/tmp/staging/model.pkl",
+    }
 
-    # Define a side-effect that creates an empty file so os.remove() succeeds during cleanup
-    def fake_write_json(filepath, data):
-        with open(filepath, 'w') as f:
-            f.write('{}')
-
-    with patch(
-        "pipelines.training_pipeline.src.components.model_registry.write_json_file", 
-        side_effect=fake_write_json
-    ) as mock_write:
-        s3_vault_uri = registry._execute_two_phase_commit(staged_files)
-
-    expected_vault_uri = f"{registry_config.s3_models_dir_uri}/{pipeline_context.run_id}"
-    assert s3_vault_uri == expected_vault_uri
-
-    # Verify Phase 1: Folder sync
-    pipeline_context.s3_sync.sync_folder_to_s3.assert_called_once_with(
-        folder=registry_config.staging_dir,
-        aws_bucket_url=expected_vault_uri
+    returned_uri = registry._execute_two_phase_commit(
+        staged_files
     )
 
-    # Verify Phase 2: Pointer file mutation
-    pipeline_context.s3_sync.upload_file.assert_called_once()
-    upload_call_args = pipeline_context.s3_sync.upload_file.call_args[0]
-    assert upload_call_args[1] == registry_config.s3_pointer_uri
+    expected_vault_uri = (
+        f"{mr_config.s3_models_dir_uri}/"
+        f"{mock_pipeline_context.run_id}"
+    )
 
-    # Verify state payload content through the intercepted write_json_file call
-    write_args = mock_write.call_args[0]
-    assert "tmp_model_state.json" in write_args[0]
-    
-    payload = write_args[1]
-    assert payload["run_id"] == pipeline_context.run_id
-    assert payload["s3_model_path"] == f"{expected_vault_uri}/model.pkl"
-    assert payload["training_dataset_s3_uri"] == pipeline_context.training_dataset_s3_uri_path
+    assert returned_uri == expected_vault_uri
 
-def test_model_registry_run_success(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
+    # Phase 1: Sync to Vault
+    mock_pipeline_context.s3_sync.sync_folder_to_s3.assert_called_once_with(
+        folder=mr_config.staging_dir,
+        aws_bucket_url=expected_vault_uri,
+    )
+
+    # Phase 2: Overwrite Mutable Pointer
+    mock_write_json.assert_called_once()
+
+    payload = mock_write_json.call_args[0][1]
+
+    assert payload["run_id"] == mock_pipeline_context.run_id
+    assert (
+        payload["s3_model_path"]
+        == f"{expected_vault_uri}/model.pkl"
+    )
+    assert (
+        payload["s3_schema_path"]
+        == f"{expected_vault_uri}/schema.json"
+    )
+
+    mock_pipeline_context.s3_sync.upload_file.assert_called_once()
+    mock_remove.assert_called_once()
+
+
+def test_execute_two_phase_commit_failure_raises(
+    mr_config: ModelRegistryConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+    dummy_model_evaluator_artifact: ModelEvaluatorArtifact,
+) -> None:
     registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+        config=mr_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
+        evaluator_artifact=dummy_model_evaluator_artifact,
     )
 
-    artifact = registry.run()
-
-    assert artifact.deployment_status is True
-    assert pipeline_context.run_id in artifact.s3_model_uri
-    assert os.path.exists(artifact.metadata_file_path)
-
-    # Validate Component Metadata
-    with open(artifact.metadata_file_path, "r") as f:
-        meta = json.load(f)
-
-    assert meta["deployment_successful"] is True
-    assert meta["s3_vault_uri"] == artifact.s3_model_uri
-
-
-def test_model_registry_run_failure(
-    pipeline_context,
-    registry_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-    model_evaluator_artifact,
-):
-    registry = ModelRegistry(
-        config=registry_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
-        evaluator_artifact=model_evaluator_artifact,
+    # Simulate network failure during sync
+    mock_pipeline_context.s3_sync.sync_folder_to_s3.side_effect = Exception(
+        "S3 bucket access denied"
     )
 
-    # Simulate an S3 upload failure
-    pipeline_context.s3_sync.sync_folder_to_s3.side_effect = Exception(
-        "S3 Access Denied"
-    )
+    with pytest.raises(CustomException) as exc_info:
+        registry._execute_two_phase_commit({})
 
-    with pytest.raises(CustomException) as excinfo:
-        registry.run()
-
-    assert "S3 Access Denied" in str(excinfo.value)
+    assert "S3 bucket access denied" in str(exc_info.value)

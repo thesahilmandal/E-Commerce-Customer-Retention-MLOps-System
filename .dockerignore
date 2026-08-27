@@ -27,3 +27,9 @@ config
 .vscode/
 .idea/
 .DS_Store
+
+# 6. Exclude pipeline tests from the Docker build context
+pipelines/data_pipeline/tests/
+pipelines/training_pipeline/tests/
+pipelines/inference_pipeline/tests/
+pipelines/monitoring_pipeline/tests/

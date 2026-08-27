@@ -1,85 +1,141 @@
-import yaml
 import pytest
+from pathlib import Path
 
 from pipelines.training_pipeline.src.core.config_parser import ConfigParser
 from shared_core.exceptions.custom_exception import CustomException
 
 
-def test_config_parser_initialization_success(mock_config_parser, sample_config_dict):
-    global_config = mock_config_parser.get_global_config()
-    data_processor_config = mock_config_parser.get_data_processor_config()
-    model_trainer_config = mock_config_parser.get_model_trainer_config()
-    model_evaluator_config = mock_config_parser.get_model_evaluator_config()
-    model_registry_config = mock_config_parser.get_model_registry_config()
+def test_config_parser_success(
+    env_vars: None,
+    dummy_yaml_config: str,
+) -> None:
+    parser = ConfigParser(config_filepath=dummy_yaml_config)
 
-    expected_config = sample_config_dict["training_pipeline"]
+    global_cfg = parser.get_global_config()
+    assert global_cfg["s3_bucket_name"] == "test-pipeline-artifacts-bucket"
+    assert global_cfg["target_column"] == "target_is_churn"
 
-    assert global_config["s3_bucket_name"] == expected_config["global"]["s3_bucket_name"]
-    assert data_processor_config["val_size"] == expected_config["data_processor"]["val_size"]
-    assert model_trainer_config["mlflow_experiment_name"] == expected_config["model_trainer"]["mlflow_experiment_name"]
-    assert model_evaluator_config["min_eroi_threshold"] == expected_config["model_evaluator"]["min_eroi_threshold"]
-    assert model_registry_config["deployment_environment"] == expected_config["model_registry"]["deployment_environment"]
+    dp_cfg = parser.get_data_processor_config()
+    assert dp_cfg["val_size"] == 0.15
+    assert "snapshot_date" in dp_cfg["system_columns_to_drop"]
+
+    mt_cfg = parser.get_model_trainer_config()
+    assert mt_cfg["optuna_n_trials"] == 2
+    assert mt_cfg["calibration_method"] == "isotonic"
+
+    me_cfg = parser.get_model_evaluator_config()
+    assert me_cfg["min_eroi_threshold"] == 0.05
+    assert me_cfg["business_assumptions"]["campaign_cost"] == 10.0
+
+    mr_cfg = parser.get_model_registry_config()
+    assert mr_cfg["deployment_environment"] == "testing"
 
 
-def test_config_parser_missing_file():
-    missing_path = "non_existent_config_file.yaml"
+def test_missing_config_file() -> None:
+    with pytest.raises(CustomException) as exc_info:
+        ConfigParser(config_filepath="nonexistent_config.yaml")
+
+    assert "not found at" in str(exc_info.value)
+    assert "nonexistent_config.yaml" in str(exc_info.value)
+
+
+def test_empty_config_file(tmp_path: Path) -> None:
+    empty_file = tmp_path / "empty.yaml"
+    empty_file.write_text("")
 
     with pytest.raises(CustomException) as exc_info:
-        ConfigParser(config_filepath=missing_path)
+        ConfigParser(config_filepath=str(empty_file))
 
-    assert "Configuration file not found at" in str(exc_info.value)
+    assert "empty or invalid" in str(exc_info.value)
 
 
-def test_config_parser_empty_file(tmp_path):
-    empty_file_path = tmp_path / "empty_config.yaml"
-    empty_file_path.touch()
+def test_invalid_yaml_syntax(tmp_path: Path) -> None:
+    invalid_file = tmp_path / "invalid.yaml"
+    invalid_file.write_text("global: [unclosed list")
+
+    with pytest.raises(CustomException):
+        ConfigParser(config_filepath=str(invalid_file))
+
+
+def test_missing_required_section(tmp_path: Path) -> None:
+    yaml_content = """
+training_pipeline:
+global: {}
+data_processor: {}
+model_trainer: {}
+model_registry: {}
+"""
+
+    bad_file = tmp_path / "missing_section.yaml"
+    bad_file.write_text(yaml_content)
 
     with pytest.raises(CustomException) as exc_info:
-        ConfigParser(config_filepath=str(empty_file_path))
-
-    assert "Configuration file is empty or invalid" in str(exc_info.value)
-
-
-def test_config_parser_missing_required_section(tmp_path, sample_config_dict):
-    del sample_config_dict["training_pipeline"]["model_trainer"]
-
-    malformed_config_path = tmp_path / "missing_section_config.yaml"
-
-    with open(malformed_config_path, "w") as f:
-        yaml.dump(sample_config_dict, f)
-
-    with pytest.raises(CustomException) as exc_info:
-        ConfigParser(config_filepath=str(malformed_config_path))
+        ConfigParser(config_filepath=str(bad_file))
 
     assert "Missing required configuration sections" in str(exc_info.value)
-    assert "model_trainer" in str(exc_info.value)
+    assert "'model_evaluator'" in str(exc_info.value)
 
 
-def test_config_parser_invalid_section_type(tmp_path, sample_config_dict):
-    sample_config_dict["training_pipeline"]["data_processor"] = None
+def test_empty_section_raises_validation_error(tmp_path: Path) -> None:
+    yaml_content = """
+training_pipeline:
+global: {}
+data_processor: {}
+model_trainer: {}
+model_evaluator: {}
+model_registry:
+"""
 
-    invalid_section_config_path = tmp_path / "invalid_section_config.yaml"
-
-    with open(invalid_section_config_path, "w") as f:
-        yaml.dump(sample_config_dict, f)
+    bad_file = tmp_path / "empty_section.yaml"
+    bad_file.write_text(yaml_content)
 
     with pytest.raises(CustomException) as exc_info:
-        ConfigParser(config_filepath=str(invalid_section_config_path))
+        ConfigParser(config_filepath=str(bad_file))
 
     assert "are empty or invalid" in str(exc_info.value)
-    assert "data_processor" in str(exc_info.value)
+    assert "missing YAML indentation" in str(exc_info.value)
 
 
-def test_config_parser_fallback_to_root_namespace(tmp_path, sample_config_dict):
-    root_config = sample_config_dict["training_pipeline"]
+def test_resolve_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXISTING_VAR", "injected_value")
 
-    root_namespace_config_path = tmp_path / "root_namespace_config.yaml"
+    yaml_content = """
+global:
+  s3_bucket_name: "${EXISTING_VAR}"
+data_processor:
+  val_size: "${MISSING_VAR_WITH_DEFAULT:-0.2}"
+model_trainer:
+  mlflow_experiment_name: "${MISSING_VAR}"
+model_evaluator: {}
+model_registry: {}
+"""
 
-    with open(root_namespace_config_path, "w") as f:
-        yaml.dump(root_config, f)
+    file_path = tmp_path / "env.yaml"
+    file_path.write_text(yaml_content)
 
-    parser = ConfigParser(config_filepath=str(root_namespace_config_path))
+    parser = ConfigParser(config_filepath=str(file_path))
 
-    global_config = parser.get_global_config()
+    assert parser.get_global_config()["s3_bucket_name"] == "injected_value"
+    assert parser.get_data_processor_config()["val_size"] == "0.2"
+    assert parser.get_model_trainer_config()["mlflow_experiment_name"] == ""
 
-    assert global_config["target_column"] == root_config["global"]["target_column"]
+
+def test_fallback_without_root_namespace(tmp_path: Path) -> None:
+    yaml_content = """
+global:
+  key: "val"
+data_processor: {}
+model_trainer: {}
+model_evaluator: {}
+model_registry: {}
+"""
+
+    file_path = tmp_path / "no_namespace.yaml"
+    file_path.write_text(yaml_content)
+
+    parser = ConfigParser(config_filepath=str(file_path))
+
+    assert parser.get_global_config()["key"] == "val"

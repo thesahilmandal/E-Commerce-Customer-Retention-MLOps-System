@@ -1,133 +1,146 @@
-import os
-from unittest.mock import MagicMock
-
-import duckdb
 import pytest
+
+from unittest.mock import MagicMock, patch
 
 from pipelines.data_pipeline.src.core.config_parser import DataPipelineConfig
 from pipelines.data_pipeline.src.core.context import PipelineContext
 from shared_core.exceptions.custom_exception import CustomException
 
 
-def test_context_initialization_success(parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock):
+@patch("pipelines.data_pipeline.src.core.context.os.makedirs")
+@patch("pipelines.data_pipeline.src.core.context.duckdb.connect")
+def test_pipeline_context_initialization_success(
+    mock_duckdb_connect: MagicMock,
+    mock_makedirs: MagicMock,
+    dummy_pipeline_config: DataPipelineConfig,
+    mock_s3_sync: MagicMock,
+) -> None:
+    mock_con = MagicMock()
+    mock_duckdb_connect.return_value = mock_con
+
     context = PipelineContext(
-        run_id="test_run_init",
-        start_date="2016-09-01",
-        end_date="2016-10-01",
-        config=parsed_config,
-        s3_sync=mock_s3_sync
+        run_id="test_run_01",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config=dummy_pipeline_config,
+        s3_sync=mock_s3_sync,
     )
 
-    assert context.run_id == "test_run_init"
-    assert context.start_date == "2016-09-01"
-    assert context.end_date == "2016-10-01"
-    assert context.config == parsed_config
+    assert context.run_id == "test_run_01"
+    assert context.start_date == "2023-01-01"
+    assert context.end_date == "2023-06-01"
+    assert context.config == dummy_pipeline_config
     assert context.s3_sync == mock_s3_sync
-    assert context.db_con is not None
+    assert context.db_con == mock_con
 
-    assert os.path.exists(parsed_config.compute.runtime.temp_directory)
+    mock_makedirs.assert_called_once_with(
+        "/tmp/test_data_pipeline_spill",
+        exist_ok=True,
+    )
+    mock_duckdb_connect.assert_called_once_with(database=":memory:")
 
-    context.close()
-    assert context.db_con is None
-
-
-def test_context_manager_lifecycle(parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock):
-    with PipelineContext(
-        run_id="test_run_lifecycle",
-        start_date="2016-09-01",
-        end_date="2016-10-01",
-        config=parsed_config,
-        s3_sync=mock_s3_sync
-    ) as context:
-        assert context.db_con is not None
-        db_con_reference = context.db_con
-
-        res = db_con_reference.execute("SELECT 1").fetchone()
-        assert res == (1,)
-
-    assert context.db_con is None
-
-    with pytest.raises(Exception):
-        db_con_reference.execute("SELECT 1")
+    mock_con.execute.assert_any_call("PRAGMA threads=2;")
+    mock_con.execute.assert_any_call("PRAGMA memory_limit='4GB';")
+    mock_con.execute.assert_any_call(
+        "PRAGMA temp_directory='/tmp/test_data_pipeline_spill';"
+    )
+    mock_con.execute.assert_any_call("INSTALL httpfs;")
+    mock_con.execute.assert_any_call("LOAD httpfs;")
+    mock_con.execute.assert_any_call("CALL load_aws_credentials();")
 
 
-def test_duckdb_initialization_failure(
-    parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock, monkeypatch: pytest.MonkeyPatch
-):
-    def mock_connect(*args, **kwargs):
-        raise RuntimeError("Simulated DuckDB connection failure")
+@patch("pipelines.data_pipeline.src.core.context.os.makedirs")
+@patch("pipelines.data_pipeline.src.core.context.duckdb.connect")
+def test_pipeline_context_initialization_failure(
+    mock_duckdb_connect: MagicMock,
+    mock_makedirs: MagicMock,
+    dummy_pipeline_config: DataPipelineConfig,
+    mock_s3_sync: MagicMock,
+) -> None:
+    mock_duckdb_connect.side_effect = Exception(
+        "DuckDB initialization failed"
+    )
 
-    monkeypatch.setattr(duckdb, "connect", mock_connect)
-
-    with pytest.raises(CustomException) as exc_info:
+    with pytest.raises(CustomException):
         PipelineContext(
-            run_id="test_run_fail",
-            start_date="2016-09-01",
-            end_date="2016-10-01",
-            config=parsed_config,
-            s3_sync=mock_s3_sync
+            run_id="test_run_02",
+            start_date="2023-01-01",
+            end_date="2023-06-01",
+            config=dummy_pipeline_config,
+            s3_sync=mock_s3_sync,
         )
 
-    assert "Simulated DuckDB connection failure" in str(exc_info.value)
 
-
-def test_duckdb_pragmas_and_extensions_loaded(
-    parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock, monkeypatch: pytest.MonkeyPatch
-):
+@patch("pipelines.data_pipeline.src.core.context.os.makedirs")
+@patch("pipelines.data_pipeline.src.core.context.duckdb.connect")
+def test_pipeline_context_close_success(
+    mock_duckdb_connect: MagicMock,
+    mock_makedirs: MagicMock,
+    dummy_pipeline_config: DataPipelineConfig,
+    mock_s3_sync: MagicMock,
+) -> None:
     mock_con = MagicMock()
-    monkeypatch.setattr(duckdb, "connect", lambda *args, **kwargs: mock_con)
+    mock_duckdb_connect.return_value = mock_con
 
-    PipelineContext(
-        run_id="test_run_pragmas",
-        start_date="2016-09-01",
-        end_date="2016-10-01",
-        config=parsed_config,
-        s3_sync=mock_s3_sync
-    )
-
-    executed_queries = [call.args[0] for call in mock_con.execute.call_args_list]
-
-    assert any(f"PRAGMA threads={parsed_config.compute.hardware.threads}" in q for q in executed_queries)
-    assert any(f"PRAGMA memory_limit='{parsed_config.compute.hardware.memory_limit}'" in q for q in executed_queries)
-    assert any(f"PRAGMA temp_directory='{parsed_config.compute.runtime.temp_directory}'" in q for q in executed_queries)
-    assert any("INSTALL httpfs" in q for q in executed_queries)
-    assert any("LOAD httpfs" in q for q in executed_queries)
-    assert any("CALL load_aws_credentials()" in q for q in executed_queries)
-
-
-def test_close_handles_exceptions_gracefully(
-    parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock
-):
     context = PipelineContext(
-        run_id="test_run_close",
-        start_date="2016-09-01",
-        end_date="2016-10-01",
-        config=parsed_config,
-        s3_sync=mock_s3_sync
-    )
-    
-    # Overwrite the real C-extension object entirely with a Mock
-    mock_db_con = MagicMock()
-    mock_db_con.close.side_effect = RuntimeError("Simulated close failure")
-    context.db_con = mock_db_con
-    
-    context.close()
-    
-    mock_db_con.close.assert_called_once()
-    assert context.db_con is None
-    
-
-def test_close_idempotency(parsed_config: DataPipelineConfig, mock_s3_sync: MagicMock):
-    context = PipelineContext(
-        run_id="test_run_idempotency",
-        start_date="2016-09-01",
-        end_date="2016-10-01",
-        config=parsed_config,
-        s3_sync=mock_s3_sync
+        run_id="test_run_03",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config=dummy_pipeline_config,
+        s3_sync=mock_s3_sync,
     )
 
     context.close()
+
+    mock_con.close.assert_called_once()
     assert context.db_con is None
 
+
+@patch("pipelines.data_pipeline.src.core.context.os.makedirs")
+@patch("pipelines.data_pipeline.src.core.context.duckdb.connect")
+def test_pipeline_context_close_with_exception_suppressed(
+    mock_duckdb_connect: MagicMock,
+    mock_makedirs: MagicMock,
+    dummy_pipeline_config: DataPipelineConfig,
+    mock_s3_sync: MagicMock,
+) -> None:
+    mock_con = MagicMock()
+    mock_con.close.side_effect = Exception("Failed to close gracefully")
+    mock_duckdb_connect.return_value = mock_con
+
+    context = PipelineContext(
+        run_id="test_run_04",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config=dummy_pipeline_config,
+        s3_sync=mock_s3_sync,
+    )
+
     context.close()
+
+    mock_con.close.assert_called_once()
+    assert context.db_con is None
+
+
+@patch("pipelines.data_pipeline.src.core.context.os.makedirs")
+@patch("pipelines.data_pipeline.src.core.context.duckdb.connect")
+def test_pipeline_context_manager_lifecycle(
+    mock_duckdb_connect: MagicMock,
+    mock_makedirs: MagicMock,
+    dummy_pipeline_config: DataPipelineConfig,
+    mock_s3_sync: MagicMock,
+) -> None:
+    mock_con = MagicMock()
+    mock_duckdb_connect.return_value = mock_con
+
+    with PipelineContext(
+        run_id="test_run_05",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config=dummy_pipeline_config,
+        s3_sync=mock_s3_sync,
+    ) as context:
+        assert context.db_con is mock_con
+
+    mock_con.close.assert_called_once()
     assert context.db_con is None

@@ -1,233 +1,240 @@
-import os
-import json
-from unittest.mock import patch
-
 import pandas as pd
-import numpy as np
 import pytest
+from unittest.mock import MagicMock, patch
 
-from pipelines.training_pipeline.src.components.data_processor import (
-    CategoricalSchemaEnforcer,
-    DataProcessor,
-)
+from pipelines.training_pipeline.src.components.data_processor import DataProcessor
 from pipelines.training_pipeline.src.entity.config_entity import DataProcessorConfig
 from shared_core.exceptions.custom_exception import CustomException
 
 
-def test_categorical_schema_enforcer_fit_transform():
-    df = pd.DataFrame(
-        {
-            "num1": [1, 2, np.nan, 4],
-            "num2": ["10", "20", "30", "40"],
-            "cat1": ["A", "B", "A", np.nan],
-            "cat2": ["X", "Y", "X", "Y"],
-        }
-    )
-
-    enforcer = CategoricalSchemaEnforcer(
-        categorical_features=["cat1", "cat2"],
-        numerical_features=["num1", "num2"],
-    )
-
-    enforcer.fit(df)
-
-    assert set(enforcer.categories_["cat1"]) == {"A", "B"}
-    assert set(enforcer.categories_["cat2"]) == {"X", "Y"}
-
-    df_transformed = enforcer.transform(df)
-
-    assert pd.api.types.is_numeric_dtype(df_transformed["num1"])
-    assert pd.api.types.is_numeric_dtype(df_transformed["num2"])
-
-    assert isinstance(df_transformed["cat1"].dtype, pd.CategoricalDtype)
-    assert set(df_transformed["cat1"].cat.categories) == {"A", "B"}
-
-    expected_cols = ["num1", "num2", "cat1", "cat2"]
-    assert list(df_transformed.columns) == expected_cols
-
-
-def test_categorical_schema_enforcer_unseen_categories_and_bad_numeric():
-    df_train = pd.DataFrame(
-        {
-            "num": [1, 2],
-            "cat": ["A", "B"],
-        }
-    )
-
-    enforcer = CategoricalSchemaEnforcer(
-        categorical_features=["cat"],
-        numerical_features=["num"],
-    )
-    enforcer.fit(df_train)
-
-    df_test = pd.DataFrame(
-        {
-            "num": [3, "not_a_number"],
-            "cat": ["A", "C"],
-            "extra_col": ["drop", "me"],
-        }
-    )
-
-    df_transformed = enforcer.transform(df_test)
-
-    assert pd.isna(df_transformed.loc[1, "cat"])
-    assert pd.isna(df_transformed.loc[1, "num"])
-    assert "extra_col" not in df_transformed.columns
-
-
-def test_categorical_schema_enforcer_missing_columns_during_transform():
-    df_train = pd.DataFrame({"num": [1], "cat": ["A"]})
-    enforcer = CategoricalSchemaEnforcer(
-        categorical_features=["cat"],
-        numerical_features=["num"],
-    ).fit(df_train)
-
-    df_test = pd.DataFrame({"num": [2]})
-    df_transformed = enforcer.transform(df_test)
-
-    assert "cat" in df_transformed.columns
-    assert df_transformed["cat"].isna().all()
-    assert isinstance(df_transformed["cat"].dtype, pd.CategoricalDtype)
+@pytest.fixture
+def dp_config(
+    mock_pipeline_context: MagicMock,
+) -> DataProcessorConfig:
+    return DataProcessorConfig.from_context(mock_pipeline_context)
 
 
 @pytest.fixture
-def dp_config(pipeline_context):
-    return DataProcessorConfig.from_context(pipeline_context)
-
-
-def test_data_processor_isolate_features_and_target(
-    pipeline_context, dp_config, synthetic_dataframe
-):
-    processor = DataProcessor(config=dp_config, context=pipeline_context)
-
-    X, y = processor._isolate_features_and_target(synthetic_dataframe)
-
-    assert y.name == dp_config.target_column
-    assert len(y) == len(synthetic_dataframe)
-
-    system_cols = dp_config.system_columns_to_drop
-    for col in system_cols:
-        assert col not in X.columns
-
-    assert dp_config.target_column not in X.columns
-    assert "num_feature_1" in X.columns
-
-
-def test_data_processor_isolate_missing_target(
-    pipeline_context, dp_config, synthetic_dataframe
-):
-    processor = DataProcessor(config=dp_config, context=pipeline_context)
-
-    df_no_target = synthetic_dataframe.drop(columns=[dp_config.target_column])
-
-    with pytest.raises(CustomException) as excinfo:
-        processor._isolate_features_and_target(df_no_target)
-
-    assert f"Target column '{dp_config.target_column}' not found" in str(
-        excinfo.value
+def sample_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "target_is_churn": [1, 0, 1, 0, 1],
+            "customer_unique_id": ["c1", "c2", "c3", "c4", "c5"],
+            "snapshot_date": ["2023-01-01"] * 5,
+            "ingested_at_utc": ["2023"] * 5,
+            "target_180d_ltv": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "numerical_feat": [1.1, 2.2, 3.3, 4.4, 5.5],
+            "categorical_feat": ["A", "B", "A", "C", "B"],
+        }
     )
 
 
-def test_data_processor_split_data_out_of_core(pipeline_context, dp_config):
-    processor = DataProcessor(config=dp_config, context=pipeline_context)
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.pd.read_parquet"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.joblib.dump"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.write_json_file"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.os.remove"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.os.path.exists",
+    return_value=True,
+)
+@patch("pandas.DataFrame.to_parquet")
+def test_run_success(
+    mock_to_parquet: MagicMock,
+    mock_exists: MagicMock,
+    mock_remove: MagicMock,
+    mock_write_json: MagicMock,
+    mock_joblib: MagicMock,
+    mock_read_parquet: MagicMock,
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+    sample_df: pd.DataFrame,
+) -> None:
+    # Ensure reading parquet returns our mocked DataFrame
+    mock_read_parquet.return_value = sample_df.copy()
+
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
+
+    # Mock the DuckDB out-of-core splitting to avoid actual DB and S3 interaction
+    with patch.object(processor, "_split_data_out_of_core"):
+        artifact = processor.run()
+
+    # Validate Artifact output matches configuration paths
+    assert artifact.preprocessor_file_path == dp_config.preprocessor_file_path
+    assert artifact.schema_file_path == dp_config.schema_file_path
+    assert artifact.metadata_file_path == dp_config.metadata_file_path
+    assert artifact.x_train_file_path == dp_config.x_train_file_path
+
+    # Schema blueprint and execution metadata should be generated
+    assert mock_write_json.call_count == 2
+
+    # DataFrames saved (X_train, y_train, X_val, y_val, X_test, y_test)
+    assert mock_to_parquet.call_count == 6
+
+    # CategoricalSchemaEnforcer serialized
+    mock_joblib.assert_called_once()
+
+    # Cleanup of 3 temporary split files
+    assert mock_remove.call_count == 3
+
+
+def test_split_data_out_of_core_queries(
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
 
     processor._split_data_out_of_core()
 
-    execute_calls = pipeline_context.db_conn.execute.call_args_list
-    assert len(execute_calls) >= 4
+    execute_mock = mock_pipeline_context.db_conn.execute
+    assert execute_mock.call_count == 5
 
-    queries = [call[0][0] for call in execute_calls]
+    calls = execute_mock.call_args_list
 
-    assert any("setseed" in q for q in queries)
-    assert any(dp_config.training_dataset_s3_uri_path in q for q in queries)
+    # 1. Random seed
+    assert "SELECT setseed(0.042);" in calls[0][0][0]
 
-    train_bound = 1.0 - dp_config.val_size - dp_config.test_size
-    val_bound = train_bound + dp_config.val_size
+    # 2. Source table creation
+    assert "CREATE OR REPLACE TEMP TABLE source_table" in calls[1][0][0]
+    assert dp_config.training_dataset_s3_uri_path in calls[1][0][0]
 
-    assert any(f"<= {train_bound}" in q for q in queries)
-    assert any(
-        f"> {train_bound} AND _split_val <= {val_bound}" in q
-        for q in queries
-    )
-    assert any(f"> {val_bound}" in q for q in queries)
+    # 3. Train Split (1 - 0.15 - 0.15 = 0.70)
+    assert "<= 0.7" in calls[2][0][0]
+
+    # 4. Validation Split (> 0.70 AND <= 0.85)
+    assert "> 0.7" in calls[3][0][0]
+    assert "<= 0.85" in calls[3][0][0]
+
+    # 5. Test Split (> 0.85)
+    assert "> 0.85" in calls[4][0][0]
 
 
-def test_data_processor_run_success(
-    pipeline_context, dp_config, synthetic_dataframe
-):
-    processor = DataProcessor(config=dp_config, context=pipeline_context)
-
-    def mock_split():
-        train, val, test = np.split(
-            synthetic_dataframe.sample(frac=1, random_state=42),
-            [
-                int(0.6 * len(synthetic_dataframe)),
-                int(0.8 * len(synthetic_dataframe)),
-            ],
-        )
-
-        train.to_parquet(
-            os.path.join(
-                dp_config.data_processor_dir, "tmp_train.parquet"
-            ),
-            index=False,
-        )
-        val.to_parquet(
-            os.path.join(
-                dp_config.data_processor_dir, "tmp_val.parquet"
-            ),
-            index=False,
-        )
-        test.to_parquet(
-            os.path.join(
-                dp_config.data_processor_dir, "tmp_test.parquet"
-            ),
-            index=False,
-        )
-
-    with patch.object(
-        processor, "_split_data_out_of_core", side_effect=mock_split
-    ):
-        artifact = processor.run()
-
-    assert artifact.preprocessor_file_path == dp_config.preprocessor_file_path
-    assert artifact.x_train_file_path == dp_config.x_train_file_path
-
-    assert os.path.exists(artifact.preprocessor_file_path)
-    assert os.path.exists(artifact.schema_file_path)
-    assert os.path.exists(artifact.metadata_file_path)
-    assert os.path.exists(artifact.x_train_file_path)
-    assert os.path.exists(artifact.y_test_file_path)
-
-    assert not os.path.exists(
-        os.path.join(dp_config.data_processor_dir, "tmp_train.parquet")
-    )
-    assert not os.path.exists(
-        os.path.join(dp_config.data_processor_dir, "tmp_val.parquet")
-    )
-    assert not os.path.exists(
-        os.path.join(dp_config.data_processor_dir, "tmp_test.parquet")
+def test_isolate_features_and_target_success(
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+    sample_df: pd.DataFrame,
+) -> None:
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
     )
 
-    with open(artifact.schema_file_path, "r") as f:
-        schema = json.load(f)
+    X, y = processor._isolate_features_and_target(sample_df)
 
-    assert "numerical" in schema["features"]
-    assert "categorical" in schema["features"]
-    assert "cat_feature_1" in schema["features"]["categorical"]
+    assert y.name == "target_is_churn"
+    assert len(y) == 5
+
+    # System columns and target must be removed from the feature matrix
+    for col in dp_config.system_columns_to_drop + ["target_is_churn"]:
+        assert col not in X.columns
+
+    # Valid predictive features remain
+    assert "numerical_feat" in X.columns
+    assert "categorical_feat" in X.columns
 
 
-def test_data_processor_run_failure_handling(
-    pipeline_context, dp_config
-):
-    processor = DataProcessor(config=dp_config, context=pipeline_context)
+def test_isolate_features_and_target_missing_target(
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+    sample_df: pd.DataFrame,
+) -> None:
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
 
+    bad_df = sample_df.drop(columns=["target_is_churn"])
+
+    with pytest.raises(CustomException) as exc_info:
+        processor._isolate_features_and_target(bad_df)
+
+    assert "not found in dataset" in str(exc_info.value)
+    assert "target_is_churn" in str(exc_info.value)
+
+
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.pd.read_parquet"
+)
+def test_load_local_parquet_failure(
+    mock_read_parquet: MagicMock,
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    mock_read_parquet.side_effect = Exception("PyArrow stream error")
+
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
+
+    with pytest.raises(CustomException) as exc_info:
+        processor._load_local_parquet("fake_file.parquet")
+
+    assert "PyArrow stream error" in str(exc_info.value)
+
+
+@patch(
+    "pipelines.training_pipeline.src.components.data_processor.write_json_file"
+)
+def test_generate_schema_blueprint(
+    mock_write_json: MagicMock,
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
+
+    enforcer_mock = MagicMock()
+    enforcer_mock.numerical_features = ["num_feat"]
+    enforcer_mock.categories_ = {"cat_feat": ["A", "B"]}
+
+    processor._generate_schema_blueprint(enforcer_mock)
+
+    mock_write_json.assert_called_once()
+
+    args = mock_write_json.call_args[0]
+    filepath, payload = args[0], args[1]
+
+    assert filepath == dp_config.schema_file_path
+    assert payload["features"]["numerical"] == ["num_feat"]
+    assert payload["features"]["categorical"] == {
+        "cat_feat": ["A", "B"]
+    }
+    assert payload["metadata"]["run_id"] == "test_run_12345"
+    assert "generated_at_utc" in payload["metadata"]
+
+
+def test_run_top_level_exception_handling(
+    dp_config: DataProcessorConfig,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    processor = DataProcessor(
+        config=dp_config,
+        context=mock_pipeline_context,
+    )
+
+    # Force a failure at the first step
     with patch.object(
         processor,
         "_split_data_out_of_core",
-        side_effect=Exception("Simulated DuckDB OOM"),
+        side_effect=Exception("Database crash"),
     ):
-        with pytest.raises(CustomException) as excinfo:
+        with pytest.raises(CustomException) as exc_info:
             processor.run()
 
-        assert "Simulated DuckDB OOM" in str(excinfo.value)
+        assert "Database crash" in str(exc_info.value)

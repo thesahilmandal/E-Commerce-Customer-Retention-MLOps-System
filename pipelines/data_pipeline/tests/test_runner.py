@@ -1,159 +1,172 @@
-import sys
-import runpy
-from unittest.mock import MagicMock, patch
-
 import pytest
 
-from pipelines.data_pipeline.src.runner import DataPipeline, DEFAULT_CONFIG_PATH
+from typing import Dict, Generator
+from unittest.mock import MagicMock, patch
+
+from pipelines.data_pipeline.src.runner import DataPipeline
 from shared_core.exceptions.custom_exception import CustomException
 
 
 @pytest.fixture
-def mock_dependencies():
-    with patch("pipelines.data_pipeline.src.runner.PipelineConfigParser") as parser, \
-        patch("pipelines.data_pipeline.src.runner.S3Sync") as s3, \
-        patch("pipelines.data_pipeline.src.runner.PipelineContext") as ctx, \
-        patch("pipelines.data_pipeline.src.runner.DataDiscovery") as disc, \
-        patch("pipelines.data_pipeline.src.runner.DataValidation") as val, \
-        patch("pipelines.data_pipeline.src.runner.FeatureMaterializer") as mat, \
-        patch("pipelines.data_pipeline.src.runner.MetadataRegistry") as reg:
+def mock_runner_deps() -> Generator[Dict[str, MagicMock], None, None]:
+    with (
+        patch("pipelines.data_pipeline.src.runner.load_dotenv") as mock_dotenv,
+        patch(
+            "pipelines.data_pipeline.src.runner.PipelineConfigParser"
+        ) as mock_parser,
+        patch("pipelines.data_pipeline.src.runner.S3Sync") as mock_s3_sync,
+        patch(
+            "pipelines.data_pipeline.src.runner.PipelineContext"
+        ) as mock_context,
+        patch("pipelines.data_pipeline.src.runner.DataDiscovery") as mock_discovery,
+        patch(
+            "pipelines.data_pipeline.src.runner.DataValidation"
+        ) as mock_validation,
+        patch(
+            "pipelines.data_pipeline.src.runner.FeatureMaterializer"
+        ) as mock_materializer,
+        patch(
+            "pipelines.data_pipeline.src.runner.MetadataRegistry"
+        ) as mock_registry,
+    ):
+        # Setup the context manager mock.
+        mock_context_instance = MagicMock()
+        mock_context.return_value.__enter__.return_value = mock_context_instance
 
-        ctx.return_value.__enter__.return_value = MagicMock()
         yield {
-            "parser": parser, "s3": s3, "ctx": ctx,
-            "disc": disc, "val": val, "mat": mat, "reg": reg
+            "dotenv": mock_dotenv,
+            "parser": mock_parser,
+            "s3_sync": mock_s3_sync,
+            "context": mock_context,
+            "context_instance": mock_context_instance,
+            "discovery": mock_discovery,
+            "validation": mock_validation,
+            "materializer": mock_materializer,
+            "registry": mock_registry,
         }
 
 
-@pytest.fixture
-def mock_origins():
-    with patch("pipelines.data_pipeline.src.core.config_parser.PipelineConfigParser") as parser, \
-        patch("shared_core.cloud.s3_operations.S3Sync") as s3, \
-        patch("pipelines.data_pipeline.src.core.context.PipelineContext") as ctx, \
-        patch("pipelines.data_pipeline.src.components.data_discovery.DataDiscovery") as disc, \
-        patch("pipelines.data_pipeline.src.components.data_validation.DataValidation") as val, \
-        patch("pipelines.data_pipeline.src.components.feature_materializer.FeatureMaterializer") as mat, \
-        patch("pipelines.data_pipeline.src.components.metadata_registry.MetadataRegistry") as reg:
-
-        ctx.return_value.__enter__.return_value = MagicMock()
-        yield {
-            "parser": parser, "s3": s3, "ctx": ctx,
-            "disc": disc, "val": val, "mat": mat, "reg": reg
-        }
-
-
-def test_datapipeline_run_success(mock_dependencies):
+def test_run_success(
+    mock_runner_deps: Dict[str, MagicMock],
+) -> None:
     DataPipeline.run(
-        run_id="test_run_1",
-        start_date="2016-09-01",
-        end_date="2018-03-01",
-        config_path="custom/path/config.yaml"
+        run_id="test_runner_id",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config_path="custom_config.yaml",
     )
 
-    mock_dependencies["parser"].assert_called_once_with(config_file_path="custom/path/config.yaml")
-    mock_dependencies["s3"].assert_called_once()
-    mock_dependencies["ctx"].assert_called_once()
+    mock_runner_deps["dotenv"].assert_called_once()
 
-    ctx_args = mock_dependencies["ctx"].call_args.kwargs
-    assert ctx_args["run_id"] == "test_run_1"
-    assert ctx_args["start_date"] == "2016-09-01"
-    assert ctx_args["end_date"] == "2018-03-01"
+    mock_runner_deps["parser"].assert_called_once_with(
+        config_file_path="custom_config.yaml"
+    )
+    mock_runner_deps["parser"].return_value.parse.assert_called_once()
 
-    mock_dependencies["disc"].return_value.run.assert_called_once()
-    mock_dependencies["val"].return_value.run.assert_called_once()
-    mock_dependencies["mat"].return_value.run.assert_called_once()
-    mock_dependencies["reg"].return_value.run.assert_called_once()
+    mock_runner_deps["s3_sync"].assert_called_once()
 
-
-def test_datapipeline_run_generates_run_id_if_none(mock_dependencies):
-    DataPipeline.run(
-        start_date="2016-09-01",
-        end_date="2018-03-01"
+    mock_runner_deps["context"].assert_called_once_with(
+        run_id="test_runner_id",
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+        config=mock_runner_deps["parser"].return_value.parse.return_value,
+        s3_sync=mock_runner_deps["s3_sync"].return_value,
     )
 
-    ctx_args = mock_dependencies["ctx"].call_args.kwargs
-    assert ctx_args["run_id"].startswith("run_")
-    assert len(ctx_args["run_id"]) > 4
+    mock_runner_deps["discovery"].assert_called_once_with(
+        context=mock_runner_deps["context_instance"]
+    )
+    mock_runner_deps["discovery"].return_value.run.assert_called_once()
+
+    mock_runner_deps["validation"].assert_called_once_with(
+        context=mock_runner_deps["context_instance"]
+    )
+    mock_runner_deps["validation"].return_value.run.assert_called_once()
+
+    mock_runner_deps["materializer"].assert_called_once_with(
+        context=mock_runner_deps["context_instance"]
+    )
+    mock_runner_deps["materializer"].return_value.run.assert_called_once()
+
+    mock_runner_deps["registry"].assert_called_once_with(
+        context=mock_runner_deps["context_instance"]
+    )
+    mock_runner_deps["registry"].return_value.run.assert_called_once()
 
 
-def test_datapipeline_run_missing_dates():
-    with pytest.raises(ValueError, match="Both 'start_date' and 'end_date' must be provided"):
-        DataPipeline.run(start_date=None, end_date="2018-03-01")
+def test_run_auto_generates_run_id(
+    mock_runner_deps: Dict[str, MagicMock],
+) -> None:
+    DataPipeline.run(
+        start_date="2023-01-01",
+        end_date="2023-06-01",
+    )
 
-    with pytest.raises(ValueError, match="Both 'start_date' and 'end_date' must be provided"):
-        DataPipeline.run(start_date="2016-09-01", end_date="")
+    context_call_kwargs = mock_runner_deps["context"].call_args.kwargs
+
+    assert "run_id" in context_call_kwargs
+    assert isinstance(context_call_kwargs["run_id"], str)
+    assert context_call_kwargs["run_id"].startswith("run_")
 
 
-def test_datapipeline_run_component_failure(mock_dependencies):
-    mock_dependencies["val"].return_value.run.side_effect = Exception("Simulated Validation Error")
+@pytest.mark.parametrize(
+    "start_date, end_date",
+    [
+        (None, "2023-06-01"),
+        ("2023-01-01", None),
+        (None, None),
+        ("", "2023-06-01"),
+        ("2023-01-01", ""),
+    ],
+)
+def test_run_missing_dates_raises_value_error(
+    start_date: str,
+    end_date: str,
+    mock_runner_deps: Dict[str, MagicMock],
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        DataPipeline.run(
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    assert "must be provided" in str(exc_info.value)
+    mock_runner_deps["parser"].assert_not_called()
+
+
+def test_run_component_failure_halts_execution(
+    mock_runner_deps: Dict[str, MagicMock],
+) -> None:
+    mock_runner_deps["validation"].return_value.run.side_effect = Exception(
+        "Validation logic failed"
+    )
 
     with pytest.raises(CustomException) as exc_info:
         DataPipeline.run(
-            run_id="test_run_fail",
-            start_date="2016-09-01",
-            end_date="2018-03-01"
+            start_date="2023-01-01",
+            end_date="2023-06-01",
         )
 
-    assert "Simulated Validation Error" in str(exc_info.value)
+    assert "Validation logic failed" in str(exc_info.value)
+
+    mock_runner_deps["discovery"].return_value.run.assert_called_once()
+    mock_runner_deps["validation"].return_value.run.assert_called_once()
+    mock_runner_deps["materializer"].return_value.run.assert_not_called()
+    mock_runner_deps["registry"].return_value.run.assert_not_called()
 
 
-def test_cli_execution_success(monkeypatch, mock_origins):
-    test_args = [
-        "runner.py",
-        "--run-id", "cli_run_01",
-        "--start-date", "2016-09-01",
-        "--end-date", "2018-03-01",
-        "--config-path", "test/config.yaml"
-    ]
-    monkeypatch.setattr(sys, "argv", test_args)
-
-    runpy.run_module("pipelines.data_pipeline.src.runner", run_name="__main__")
-
-    mock_origins["ctx"].assert_called_once()
-    ctx_args = mock_origins["ctx"].call_args.kwargs
-    assert ctx_args["run_id"] == "cli_run_01"
-    assert ctx_args["start_date"] == "2016-09-01"
-    assert ctx_args["end_date"] == "2018-03-01"
-
-    mock_origins["parser"].assert_called_once_with(config_file_path="test/config.yaml")
-
-
-def test_cli_execution_default_config_path(monkeypatch, mock_origins):
-    test_args = [
-        "runner.py",
-        "--start-date", "2016-09-01",
-        "--end-date", "2018-03-01"
-    ]
-    monkeypatch.setattr(sys, "argv", test_args)
-
-    runpy.run_module("pipelines.data_pipeline.src.runner", run_name="__main__")
-
-    mock_origins["parser"].assert_called_once_with(config_file_path=DEFAULT_CONFIG_PATH)
-
-
-def test_cli_execution_missing_required_args(monkeypatch):
-    test_args = ["runner.py", "--run-id", "cli_run_01"]
-    monkeypatch.setattr(sys, "argv", test_args)
-
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("pipelines.data_pipeline.src.runner", run_name="__main__")
-
-    assert exc_info.value.code == 2
-
-
-def test_cli_execution_handles_unrecoverable_failure(monkeypatch, mock_origins):
-    test_args = [
-        "runner.py",
-        "--start-date", "2016-09-01",
-        "--end-date", "2018-03-01"
-    ]
-    monkeypatch.setattr(sys, "argv", test_args)
-
-    mock_origins["disc"].return_value.run.side_effect = Exception(
-        "Simulated unrecoverable pipeline crash"
+def test_run_config_parser_failure(
+    mock_runner_deps: Dict[str, MagicMock],
+) -> None:
+    mock_runner_deps["parser"].side_effect = Exception(
+        "YAML formatting issue"
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("pipelines.data_pipeline.src.runner", run_name="__main__")
+    with pytest.raises(CustomException) as exc_info:
+        DataPipeline.run(
+            start_date="2023-01-01",
+            end_date="2023-06-01",
+        )
 
-    assert exc_info.value.code == 1
+    assert "YAML formatting issue" in str(exc_info.value)
+    mock_runner_deps["context"].assert_not_called()

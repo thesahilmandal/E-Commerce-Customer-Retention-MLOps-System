@@ -32,14 +32,10 @@ import pyarrow.parquet as pq
 import s3fs
 from dotenv import load_dotenv
 
-# Load AWS Credentials securely from .env file
-
-load_dotenv()
-
-# Fallback for custom logging/exceptions if running outside the main project tree
-
 from shared_core.exceptions.custom_exception import CustomException
 from shared_core.logging.custom_logging import logging
+
+load_dotenv()
 
 
 class SyntheticDataGeneratorConfig:

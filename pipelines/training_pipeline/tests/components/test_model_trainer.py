@@ -1,211 +1,354 @@
-import os
-import json
-import joblib
-import pytest
-import pandas as pd
 import numpy as np
-from xgboost import XGBClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.pipeline import Pipeline
+import pandas as pd
+import pytest
+from unittest.mock import MagicMock, patch
 
 from pipelines.training_pipeline.src.components.model_trainer import ModelTrainer
+from pipelines.training_pipeline.src.entity.artifact_entity import (
+    DataProcessorArtifact,
+)
 from pipelines.training_pipeline.src.entity.config_entity import ModelTrainerConfig
 from shared_core.exceptions.custom_exception import CustomException
 
 
 @pytest.fixture
-def trainer_config(pipeline_context):
-    return ModelTrainerConfig.from_context(pipeline_context)
+def mt_config(
+    mock_pipeline_context: MagicMock,
+) -> ModelTrainerConfig:
+    return ModelTrainerConfig.from_context(mock_pipeline_context)
 
 
-def test_model_trainer_initialization(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch("pipelines.training_pipeline.src.components.model_trainer.joblib.dump")
+def test_run_success(
+    mock_joblib_dump: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    assert trainer.config == trainer_config
-    assert trainer.context == pipeline_context
-    assert trainer.data_artifact == data_processor_artifact
+    with (
+        patch.object(
+            trainer,
+            "_load_data",
+            return_value=(
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+            ),
+        ),
+        patch.object(
+            trainer,
+            "_optimize_hyperparameters",
+            return_value={"mock": "params"},
+        ),
+        patch.object(
+            trainer,
+            "_train_and_calibrate",
+            return_value=(MagicMock(), MagicMock()),
+        ),
+        patch.object(
+            trainer,
+            "_construct_mega_pipeline",
+            return_value=MagicMock(),
+        ),
+        patch.object(trainer, "_generate_shap_artifacts"),
+        patch.object(trainer, "_generate_reference_distributions"),
+        patch.object(trainer, "_generate_metadata"),
+    ):
+        artifact = trainer.run()
+
+        assert artifact.model_file_path == mt_config.model_file_path
+        assert (
+            artifact.shap_summary_file_path
+            == mt_config.shap_summary_file_path
+        )
+        assert artifact.metadata_file_path == mt_config.metadata_file_path
+
+        mock_joblib_dump.assert_called_once()
 
 
-def test_model_trainer_load_data(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.pd.read_parquet"
+)
+def test_load_data_success(
+    mock_read_parquet: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
+
+    mock_df = pd.DataFrame({"dummy": [1, 2]})
+    mock_read_parquet.return_value = mock_df
 
     X_train, y_train, X_val, y_val = trainer._load_data()
 
+    assert mock_read_parquet.call_count == 4
     assert isinstance(X_train, pd.DataFrame)
     assert isinstance(y_train, np.ndarray)
-    assert isinstance(X_val, pd.DataFrame)
-    assert isinstance(y_val, np.ndarray)
-    assert len(X_train) == len(y_train)
-    assert len(X_val) == len(y_val)
 
 
-def test_model_trainer_train_and_calibrate(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.optuna.create_study"
+)
+def test_optimize_hyperparameters(
+    mock_create_study: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    X_train, y_train, _, _ = trainer._load_data()
+    mock_study = MagicMock()
+    mock_study.best_params = {
+        "n_estimators": 100,
+        "learning_rate": 0.05,
+    }
+    mock_create_study.return_value = mock_study
+
+    params = trainer._optimize_hyperparameters(
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+    )
+
+    mock_create_study.assert_called_once()
+    mock_study.optimize.assert_called_once()
+
+    assert params["n_estimators"] == 100
+    assert params["learning_rate"] == 0.05
+    assert params["enable_categorical"] is True
+    assert params["tree_method"] == "hist"
+    assert params["random_state"] == mt_config.random_state
+    assert params["n_jobs"] == -1
+
+
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.CalibratedClassifierCV"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.XGBClassifier"
+)
+def test_train_and_calibrate(
+    mock_xgb: MagicMock,
+    mock_calibrated: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
+    trainer = ModelTrainer(
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+    )
+
+    mock_xgb_instance = MagicMock()
+    mock_xgb.return_value = mock_xgb_instance
+
+    mock_calibrated_instance = MagicMock()
+    mock_calibrated.return_value = mock_calibrated_instance
+
+    X_train = pd.DataFrame()
+    y_train = np.array([])
 
     best_params = {
-        "n_estimators": 10,
-        "learning_rate": 0.1,
-        "max_depth": 3,
-        "min_child_weight": 1,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "gamma": 0.0,
-        "enable_categorical": True,
-        "tree_method": "hist",
+        "n_estimators": 50,
         "random_state": 42,
-        "n_jobs": -1,
     }
 
-    calibrated_model, base_model = trainer._train_and_calibrate(
-        best_params, X_train, y_train
+    cal_model, base_model = trainer._train_and_calibrate(
+        best_params,
+        X_train,
+        y_train,
     )
 
-    assert isinstance(calibrated_model, CalibratedClassifierCV)
-    assert isinstance(base_model, XGBClassifier)
+    mock_xgb.assert_called_with(**best_params)
+    mock_xgb_instance.fit.assert_called_once()
+    mock_calibrated_instance.fit.assert_called_once()
+
+    assert cal_model == mock_calibrated_instance
+    assert base_model == mock_xgb_instance
 
 
-def test_model_trainer_construct_mega_pipeline(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.joblib.load"
+)
+def test_construct_mega_pipeline(
+    mock_joblib_load: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    X_train, y_train, _, _ = trainer._load_data()
+    mock_preprocessor = MagicMock()
+    mock_joblib_load.return_value = mock_preprocessor
 
-    dummy_xgb = XGBClassifier(
-        enable_categorical=True,
-        tree_method="hist"
+    mock_calibrated_model = MagicMock()
+
+    pipeline = trainer._construct_mega_pipeline(mock_calibrated_model)
+
+    mock_joblib_load.assert_called_once_with(
+        dummy_data_processor_artifact.preprocessor_file_path
     )
-    dummy_xgb.fit(X_train, y_train)
 
-    calibrated = CalibratedClassifierCV(estimator=dummy_xgb, cv=2)
-    calibrated.fit(X_train, y_train)
-
-    mega_pipeline = trainer._construct_mega_pipeline(calibrated)
-
-    assert isinstance(mega_pipeline, Pipeline)
-    assert "preprocessor" in mega_pipeline.named_steps
-    assert "model" in mega_pipeline.named_steps
+    assert pipeline.steps[0][0] == "preprocessor"
+    assert pipeline.steps[0][1] == mock_preprocessor
+    assert pipeline.steps[1][0] == "model"
+    assert pipeline.steps[1][1] == mock_calibrated_model
 
 
-def test_model_trainer_generate_reference_distributions(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.write_json_file"
+)
+@patch("pipelines.training_pipeline.src.components.model_trainer.plt")
+@patch("pipelines.training_pipeline.src.components.model_trainer.shap")
+def test_generate_shap_artifacts(
+    mock_shap: MagicMock,
+    mock_plt: MagicMock,
+    mock_write_json: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    X_train, _, _, _ = trainer._load_data()
+    mock_base_model = MagicMock()
+    mock_explainer = MagicMock()
 
-    trainer._generate_reference_distributions(X_train)
-
-    assert os.path.exists(
-        trainer_config.reference_feature_distributions_file_path
+    mock_explainer.shap_values.return_value = np.array(
+        [
+            [0.1, -0.2],
+            [-0.1, 0.4],
+            [0.0, 0.1],
+            [0.2, -0.1],
+            [-0.2, 0.2],
+        ]
     )
 
-    with open(
-        trainer_config.reference_feature_distributions_file_path, "r"
-    ) as f:
-        dist_data = json.load(f)
+    mock_shap.TreeExplainer.return_value = mock_explainer
 
-    assert "num_feature_1" in dist_data
-    assert dist_data["num_feature_1"]["type"] == "numerical"
-    assert "mean" in dist_data["num_feature_1"]
+    X_sample = pd.DataFrame(
+        {
+            "feat1": [1] * 5,
+            "feat2": [2] * 5,
+        }
+    )
 
-    assert "cat_feature_1" in dist_data
-    assert dist_data["cat_feature_1"]["type"] == "categorical"
-    assert "frequencies" in dist_data["cat_feature_1"]
+    trainer._generate_shap_artifacts(
+        mock_base_model,
+        X_sample,
+    )
+
+    mock_plt.figure.assert_called_once()
+    mock_shap.summary_plot.assert_called_once()
+    mock_plt.savefig.assert_called_once_with(
+        mt_config.shap_summary_file_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    mock_write_json.assert_called_once()
+
+    args = mock_write_json.call_args[0]
+
+    assert args[0] == mt_config.shap_feature_importance_file_path
+
+    importances = args[1]
+
+    assert list(importances.keys())[0] == "feat2"
+    assert list(importances.keys())[1] == "feat1"
+    assert np.isclose(importances["feat2"], 0.2)
+    assert np.isclose(importances["feat1"], 0.12)
 
 
-def test_model_trainer_run_success(
-    pipeline_context, trainer_config, data_processor_artifact
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_trainer.write_json_file"
+)
+def test_generate_reference_distributions(
+    mock_write_json: MagicMock,
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    artifact = trainer.run()
+    df = pd.DataFrame(
+        {
+            "num_feat": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "cat_feat": pd.Series(
+                ["A", "B", "A", "A", "C"],
+                dtype="category",
+            ),
+        }
+    )
 
-    assert artifact.model_file_path == trainer_config.model_file_path
+    trainer._generate_reference_distributions(df)
+
+    mock_write_json.assert_called_once()
+
+    args = mock_write_json.call_args[0]
+
     assert (
-        artifact.shap_summary_file_path
-        == trainer_config.shap_summary_file_path
-    )
-    assert (
-        artifact.shap_feature_importance_file_path
-        == trainer_config.shap_feature_importance_file_path
-    )
-    assert (
-        artifact.reference_feature_distributions_file_path
-        == trainer_config.reference_feature_distributions_file_path
-    )
-    assert artifact.metadata_file_path == trainer_config.metadata_file_path
-
-    assert os.path.exists(artifact.model_file_path)
-    assert os.path.exists(artifact.shap_summary_file_path)
-    assert os.path.exists(artifact.shap_feature_importance_file_path)
-    assert os.path.exists(
-        artifact.reference_feature_distributions_file_path
-    )
-    assert os.path.exists(artifact.metadata_file_path)
-
-    loaded_pipeline = joblib.load(artifact.model_file_path)
-    assert isinstance(loaded_pipeline, Pipeline)
-
-
-def test_model_trainer_run_failure(
-    pipeline_context, trainer_config, data_processor_artifact
-):
-    # Corrupt data artifact path to simulate loading failure
-    data_processor_artifact = data_processor_artifact.__class__(
-        preprocessor_file_path=data_processor_artifact.preprocessor_file_path,
-        schema_file_path=data_processor_artifact.schema_file_path,
-        metadata_file_path=data_processor_artifact.metadata_file_path,
-        x_train_file_path="non_existent_x_train.parquet",
-        y_train_file_path=data_processor_artifact.y_train_file_path,
-        x_val_file_path=data_processor_artifact.x_val_file_path,
-        y_val_file_path=data_processor_artifact.y_val_file_path,
-        x_test_file_path=data_processor_artifact.x_test_file_path,
-        y_test_file_path=data_processor_artifact.y_test_file_path,
+        args[0]
+        == mt_config.reference_feature_distributions_file_path
     )
 
+    payload = args[1]
+
+    assert payload["num_feat"]["type"] == "numerical"
+    assert payload["num_feat"]["mean"] == 3.0
+    assert payload["num_feat"]["missing_rate"] == 0.0
+
+    assert payload["cat_feat"]["type"] == "categorical"
+    assert payload["cat_feat"]["frequencies"]["A"] == 0.6
+    assert payload["cat_feat"]["frequencies"]["B"] == 0.2
+
+
+def test_run_top_level_exception_handling(
+    mt_config: ModelTrainerConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+) -> None:
     trainer = ModelTrainer(
-        config=trainer_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
+        config=mt_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
     )
 
-    with pytest.raises(CustomException) as excinfo:
-        trainer.run()
+    with patch.object(
+        trainer,
+        "_load_data",
+        side_effect=Exception("Data missing"),
+    ):
+        with pytest.raises(CustomException) as exc_info:
+            trainer.run()
 
-    assert (
-        "Failed to load training/validation datasets" in str(excinfo.value)
-        or "No such file or directory" in str(excinfo.value)
-    )
+        assert "Data missing" in str(exc_info.value)

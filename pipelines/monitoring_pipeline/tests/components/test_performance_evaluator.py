@@ -1,144 +1,359 @@
 import os
-import json
+
 import pytest
 import numpy as np
 import pandas as pd
 
-from pipelines.monitoring_pipeline.src.components.performance_evaluator import PerformanceEvaluator
-from pipelines.monitoring_pipeline.src.entity.config_entity import PerformanceEvaluatorConfig
+from unittest.mock import MagicMock, patch
+
+from pipelines.monitoring_pipeline.src.components.performance_evaluator import (
+    PerformanceEvaluator,
+)
+from pipelines.monitoring_pipeline.src.entity.config_entity import (
+    PerformanceEvaluatorConfig,
+)
 
 
 @pytest.fixture
-def perf_config(mock_context):
-    """Provides a valid configuration for the Performance Evaluator."""
-    return PerformanceEvaluatorConfig.get_config(mock_context)
-
-
-@pytest.fixture
-def performance_evaluator(perf_config, mock_context, mock_resolver_artifact):
-    """Provides a configured PerformanceEvaluator instance."""
-    return PerformanceEvaluator(
-        config=perf_config,
-        context=mock_context,
-        resolver_artifact=mock_resolver_artifact
+def eval_config(tmp_path: pytest.TempPathFactory) -> PerformanceEvaluatorConfig:
+    """Provides a mocked configuration for the Performance Evaluator."""
+    return PerformanceEvaluatorConfig(
+        evaluator_root_dir=str(tmp_path),
+        performance_report_file_path=os.path.join(
+            tmp_path,
+            "perf_report.json",
+        ),
+        metadata_file_path=os.path.join(
+            tmp_path,
+            "meta.json",
+        ),
+        campaign_cost=10.0,
+        customer_ltv=150.0,
+        intervention_save_rate=0.20,
+        log_loss_epsilon=1e-15,
     )
 
 
-def test_compute_brier_score(performance_evaluator):
-    """
-    Validates first-principles Brier Score calculation (Mean Squared Error).
-    """
-    y_true = np.array([1.0, 0.0, 1.0, 0.0])
-    y_prob = np.array([0.8, 0.2, 0.9, 0.1])
-    
-    # Expected: ((0.8-1)^2 + (0.2-0)^2 + (0.9-1)^2 + (0.1-0)^2) / 4
-    # Expected: (0.04 + 0.04 + 0.01 + 0.01) / 4 = 0.10 / 4 = 0.025
-    brier_score = performance_evaluator._compute_brier_score(y_true, y_prob)
-    
-    assert np.isclose(brier_score, 0.025)
+@pytest.fixture
+def evaluator(
+    eval_config: PerformanceEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_resolver_artifact: MagicMock,
+) -> PerformanceEvaluator:
+    """Yields a fully initialized PerformanceEvaluator."""
+    return PerformanceEvaluator(
+        config=eval_config,
+        context=mock_pipeline_context,
+        resolver_artifact=dummy_resolver_artifact,
+    )
 
 
-def test_compute_log_loss_with_epsilon_clipping(performance_evaluator):
-    """
-    Validates Log Loss calculation, specifically ensuring that mathematically
-    undefined log(0) boundaries are prevented via epsilon clipping.
-    """
-    y_true = np.array([1.0, 0.0])
-    # Extreme probabilities that would normally cause log(0)
+@patch.object(
+    PerformanceEvaluator,
+    "_load_and_join_lookback_data",
+)
+@patch.object(
+    PerformanceEvaluator,
+    "_evaluate_performance",
+)
+@patch.object(
+    PerformanceEvaluator,
+    "_save_reports",
+)
+def test_run_success(
+    mock_save_reports: MagicMock,
+    mock_evaluate: MagicMock,
+    mock_load_join: MagicMock,
+    evaluator: PerformanceEvaluator,
+) -> None:
+    mock_df = pd.DataFrame({"dummy": [1, 2]})
+
+    mock_load_join.return_value = mock_df
+    mock_evaluate.return_value = {
+        "is_evaluated": True,
+        "metrics": {},
+    }
+
+    artifact = evaluator.run()
+
+    assert (
+        artifact.performance_report_file_path
+        == evaluator.config.performance_report_file_path
+    )
+    assert (
+        artifact.metadata_file_path
+        == evaluator.config.metadata_file_path
+    )
+
+    mock_load_join.assert_called_once()
+    mock_evaluate.assert_called_once_with(mock_df)
+    mock_save_reports.assert_called_once()
+
+
+@patch(
+    "pipelines.monitoring_pipeline.src.components.performance_evaluator.pd.read_parquet"
+)
+def test_load_and_join_lookback_data_success(
+    mock_read_parquet: MagicMock,
+    evaluator: PerformanceEvaluator,
+) -> None:
+    # Telemetry
+    df1 = pd.DataFrame(
+        {
+            "customer_unique_id": ["C1", "C2", "C3"],
+            "predicted_probability": [0.1, 0.9, 0.5],
+        }
+    )
+
+    # Labels
+    df2 = pd.DataFrame(
+        {
+            "customer_unique_id": ["C2", "C3", "C4"],
+            "target_is_churn": [1, 0, 1],
+        }
+    )
+
+    mock_read_parquet.side_effect = [df1, df2]
+
+    merged_df = evaluator._load_and_join_lookback_data()
+
+    assert len(merged_df) == 2
+    assert "C2" in merged_df["customer_unique_id"].values
+    assert "C3" in merged_df["customer_unique_id"].values
+    assert "predicted_probability" in merged_df.columns
+    assert "target_is_churn" in merged_df.columns
+
+
+@patch(
+    "pipelines.monitoring_pipeline.src.components.performance_evaluator.pd.read_parquet"
+)
+def test_load_and_join_lookback_data_empty(
+    mock_read_parquet: MagicMock,
+    evaluator: PerformanceEvaluator,
+) -> None:
+    mock_read_parquet.side_effect = [
+        pd.DataFrame(),
+        pd.DataFrame({"col": [1]}),
+    ]
+
+    merged_df = evaluator._load_and_join_lookback_data()
+
+    assert merged_df.empty
+
+
+def test_evaluate_performance_immature_system(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    result = evaluator._evaluate_performance(pd.DataFrame())
+
+    assert result["is_evaluated"] is False
+    assert result["reason"] == "INSUFFICIENT_LOOKBACK_MATURITY"
+    assert result["metrics"]["brier_score"] == 0.0
+
+
+def test_evaluate_performance_missing_columns(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    df = pd.DataFrame({"wrong_col": [1, 2]})
+
+    with pytest.raises(ValueError) as exc_info:
+        evaluator._evaluate_performance(df)
+
+    assert "Missing required evaluation columns" in str(
+        exc_info.value
+    )
+
+
+def test_evaluate_performance_all_nans(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    df = pd.DataFrame(
+        {
+            evaluator.target_col: [np.nan, np.nan],
+            evaluator.prediction_col: [np.nan, np.nan],
+        }
+    )
+
+    result = evaluator._evaluate_performance(df)
+
+    assert result["is_evaluated"] is False
+    assert result["reason"] == "ALL_NAN_EVALUATION_COLUMNS"
+
+
+@patch.object(
+    PerformanceEvaluator,
+    "_compute_brier_score",
+    return_value=0.15,
+)
+@patch.object(
+    PerformanceEvaluator,
+    "_compute_log_loss",
+    return_value=0.25,
+)
+@patch.object(
+    PerformanceEvaluator,
+    "_compute_realized_roi",
+    return_value=15.0,
+)
+def test_evaluate_performance_success(
+    mock_roi: MagicMock,
+    mock_log_loss: MagicMock,
+    mock_brier: MagicMock,
+    evaluator: PerformanceEvaluator,
+) -> None:
+    df = pd.DataFrame(
+        {
+            evaluator.target_col: [1, 0, 1],
+            evaluator.prediction_col: [0.9, 0.1, 0.8],
+        }
+    )
+
+    result = evaluator._evaluate_performance(df)
+
+    assert result["is_evaluated"] is True
+    assert result["metrics"]["brier_score"] == 0.15
+    assert result["metrics"]["log_loss"] == 0.25
+    assert result["metrics"]["realized_roi"] == 15.0
+
+    mock_brier.assert_called_once()
+    mock_log_loss.assert_called_once()
+    mock_roi.assert_called_once()
+
+
+def test_compute_brier_score(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    y_true = np.array([1, 0])
+    y_prob = np.array([0.9, 0.1])
+
+    brier = evaluator._compute_brier_score(
+        y_true,
+        y_prob,
+    )
+
+    assert brier == pytest.approx(
+        0.01,
+        abs=1e-5,
+    )
+
+
+def test_compute_brier_score_exception(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    brier = evaluator._compute_brier_score(
+        np.array(["invalid"]),
+        np.array(["types"]),
+    )
+
+    assert brier == 0.0
+
+
+def test_compute_log_loss(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    y_true = np.array([1, 0])
+    y_prob = np.array([0.9, 0.1])
+
+    log_loss = evaluator._compute_log_loss(
+        y_true,
+        y_prob,
+    )
+
+    assert log_loss == pytest.approx(
+        0.10536,
+        abs=1e-4,
+    )
+
+
+def test_compute_log_loss_clipping(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    y_true = np.array([1, 0])
     y_prob = np.array([0.0, 1.0])
-    
-    log_loss = performance_evaluator._compute_log_loss(y_true, y_prob)
-    
-    # Should not be infinite or NaN
-    assert np.isfinite(log_loss)
+
+    log_loss = evaluator._compute_log_loss(
+        y_true,
+        y_prob,
+    )
+
     assert log_loss > 0.0
+    assert not np.isnan(log_loss)
+    assert not np.isinf(log_loss)
 
 
-def test_compute_realized_roi(performance_evaluator):
-    """
-    Validates the financial translation of model predictions into realized business value.
-    Config assumptions: Campaign Cost=$10, LTV=$150, Save Rate=20%
-    """
-    # 1 True Positive (Correct Churn Pred), 1 False Positive (Incorrect Churn Pred), 
-    # 1 True Negative (Correct Retention), 1 False Negative (Missed Churn)
-    y_true = np.array([1, 0, 0, 1])
-    y_prob = np.array([0.8, 0.7, 0.2, 0.1])
-    
-    roi = performance_evaluator._compute_realized_roi(y_true, y_prob)
-    
-    # Financial breakdown:
-    # 2 targeted customers (TP + FP) -> Cost: 2 * $10 = $20
-    # 1 correctly identified churner (TP) -> Saved: 1 * 0.20 = 0.2 customers
-    # Gross Benefit: 0.2 * $150 = $30
-    # Net ROI: $30 - $20 = $10.0
+def test_compute_log_loss_exception(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    loss = evaluator._compute_log_loss(
+        np.array(["invalid"]),
+        np.array(["types"]),
+    )
+
+    assert loss == 0.0
+
+
+def test_compute_realized_roi(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    y_true = np.array([1, 1, 0, 0])
+    y_prob = np.array([0.9, 0.1, 0.9, 0.1])
+
+    roi = evaluator._compute_realized_roi(
+        y_true,
+        y_prob,
+    )
+
     assert roi == 10.0
 
 
-def test_evaluate_performance_immature_system(performance_evaluator):
-    """
-    Validates that a 0-row empty DataFrame (simulating an immature lookback period)
-    is handled gracefully, safely skipping evaluation and returning defaults.
-    """
-    empty_df = pd.DataFrame()
-    report = performance_evaluator._evaluate_performance(empty_df)
-    
-    assert report["is_evaluated"] is False
-    assert report["reason"] == "INSUFFICIENT_LOOKBACK_MATURITY"
-    assert report["metrics"]["brier_score"] == 0.0
+def test_compute_realized_roi_exception(
+    evaluator: PerformanceEvaluator,
+) -> None:
+    roi = evaluator._compute_realized_roi(
+        np.array(["invalid"]),
+        np.array(["types"]),
+    )
+
+    assert roi == 0.0
 
 
-def test_evaluate_performance_nan_handling(performance_evaluator):
-    """
-    Validates that rows with missing ground truth or predictions are safely dropped
-    prior to metric calculation to prevent NaN propagation.
-    """
-    df_with_nans = pd.DataFrame({
-        performance_evaluator.target_col: [1.0, np.nan, 0.0],
-        performance_evaluator.prediction_col: [0.8, 0.5, np.nan]
-    })
-    
-    report = performance_evaluator._evaluate_performance(df_with_nans)
-    
-    assert report["is_evaluated"] is True
-    # Only the first row (1.0, 0.8) is valid.
-    # Brier for one row: (0.8 - 1.0)^2 = 0.04
-    assert np.isclose(report["metrics"]["brier_score"], 0.04)
+@patch(
+    "pipelines.monitoring_pipeline.src.components.performance_evaluator.write_json_file"
+)
+def test_save_reports(
+    mock_write_json: MagicMock,
+    evaluator: PerformanceEvaluator,
+) -> None:
+    dummy_report = {"is_evaluated": True}
 
+    evaluator._save_reports(
+        dummy_report,
+        execution_time=2.0,
+        population_size=500,
+    )
 
-def test_performance_evaluator_run_e2e(performance_evaluator, mock_resolver_artifact):
-    """
-    Validates the end-to-end component run. Tests joining separate historical 
-    telemetry and label parquet files, calculating metrics, and persisting artifacts.
-    """
-    # 1. Setup mock telemetry parquet
-    telemetry_df = pd.DataFrame({
-        performance_evaluator.customer_id_col: ["C1", "C2", "C3", "C4"],
-        performance_evaluator.prediction_col: [0.8, 0.2, 0.9, 0.4]
-    })
-    telemetry_df.to_parquet(mock_resolver_artifact.lookback_telemetry_file_path)
-    
-    # 2. Setup mock labels parquet (Missing C2, adding C5 to test inner join)
-    labels_df = pd.DataFrame({
-        performance_evaluator.customer_id_col: ["C1", "C3", "C4", "C5"],
-        performance_evaluator.target_col: [1, 1, 0, 1]
-    })
-    labels_df.to_parquet(mock_resolver_artifact.lookback_labels_file_path)
-    
-    # Run the component
-    artifact = performance_evaluator.run()
-    
-    # Assert artifacts were generated
-    assert os.path.exists(artifact.performance_report_file_path)
-    assert os.path.exists(artifact.metadata_file_path)
-    
-    # Validate report contents
-    with open(artifact.performance_report_file_path, "r") as f:
-        report = json.load(f)
-        
-    assert report["is_evaluated"] is True
-    assert "metrics" in report
-    
-    metrics = report["metrics"]
-    assert "brier_score" in metrics
-    assert "log_loss" in metrics
-    assert "realized_roi" in metrics
+    assert mock_write_json.call_count == 2
+
+    mock_write_json.assert_any_call(
+        file_path=evaluator.config.performance_report_file_path,
+        content=dummy_report,
+    )
+
+    meta_call_args = mock_write_json.call_args_list[1][1]
+
+    assert (
+        meta_call_args["file_path"]
+        == evaluator.config.metadata_file_path
+    )
+    assert (
+        meta_call_args["content"]["pipeline_stage"]
+        == "Monitoring Performance Evaluator"
+    )
+    assert (
+        meta_call_args["content"]["volumetrics"]["matured_cohort_size"]
+        == 500
+    )
+    assert (
+        meta_call_args["content"]["financial_parameters"]["campaign_cost"]
+        == 10.0
+    )

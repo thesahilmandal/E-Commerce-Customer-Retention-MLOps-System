@@ -1,169 +1,304 @@
-import os
-import json
-import pytest
-from unittest.mock import patch
 
-from pipelines.monitoring_pipeline.src.components.artifact_publisher import ArtifactPublisher
-from pipelines.monitoring_pipeline.src.entity.config_entity import ArtifactPublisherConfig
+import pytest
+from unittest.mock import MagicMock, patch
+
+from pipelines.monitoring_pipeline.src.components.artifact_publisher import (
+    ArtifactPublisher,
+)
+from pipelines.monitoring_pipeline.src.entity.config_entity import (
+    ArtifactPublisherConfig,
+)
+from pipelines.monitoring_pipeline.src.entity.artifact_entity import (
+    ArtifactPublisherArtifact,
+)
 from shared_core.exceptions.custom_exception import CustomException
 
 
 @pytest.fixture
-def publisher_config(mock_context):
-    """Provides a valid configuration for the Artifact Publisher."""
-    return ArtifactPublisherConfig.get_config(mock_context)
-
-
-@pytest.fixture
-@patch("pipelines.monitoring_pipeline.src.components.artifact_publisher.boto3.client")
-def publisher(
-    mock_boto3, 
-    publisher_config, 
-    mock_context, 
-    mock_resolver_artifact, 
-    mock_drift_artifact, 
-    mock_performance_artifact, 
-    mock_rule_engine_artifact
-):
-    """
-    Provides a configured ArtifactPublisher instance.
-    The S3 boto3 client is mocked to avoid real AWS interactions.
-    """
-    return ArtifactPublisher(
-        config=publisher_config,
-        context=mock_context,
-        resolver_artifact=mock_resolver_artifact,
-        drift_artifact=mock_drift_artifact,
-        performance_artifact=mock_performance_artifact,
-        rule_engine_artifact=mock_rule_engine_artifact
+def publisher_config(tmp_path) -> ArtifactPublisherConfig:
+    """Provides a mocked configuration for the Artifact Publisher."""
+    return ArtifactPublisherConfig(
+        publisher_root_dir=str(tmp_path),
+        s3_bucket_name="test-bucket",
+        s3_monitoring_output_prefix="monitoring_output",
+        s3_audit_reports_dir="audit",
+        s3_action_tokens_dir="tokens",
+        s3_matured_evaluations_dir="evals",
+        s3_metadata_dir="meta",
+        run_id="run_123",
+        execution_date="2026-08-27",
     )
 
 
-def test_generate_hive_partition(publisher):
-    """Validates accurate temporal parsing to a standard Hive partition format."""
-    # Override execution date for explicit testing
-    object.__setattr__(publisher.config, 'execution_date', '2026-08-14')
-    
+@pytest.fixture
+def publisher(
+    publisher_config: ArtifactPublisherConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_resolver_artifact: MagicMock,
+    dummy_drift_artifact: MagicMock,
+    dummy_performance_artifact: MagicMock,
+    dummy_rule_engine_artifact: MagicMock,
+) -> ArtifactPublisher:
+    """Yields a fully initialized ArtifactPublisher with a mocked boto3 S3 client."""
+    with patch(
+        "pipelines.monitoring_pipeline.src.components.artifact_publisher.boto3.client"
+    ) as mock_boto:
+        pub = ArtifactPublisher(
+            config=publisher_config,
+            context=mock_pipeline_context,
+            resolver_artifact=dummy_resolver_artifact,
+            drift_artifact=dummy_drift_artifact,
+            performance_artifact=dummy_performance_artifact,
+            rule_engine_artifact=dummy_rule_engine_artifact,
+        )
+
+        pub.s3_client = mock_boto.return_value
+        return pub
+
+
+def test_generate_hive_partition_success(
+    publisher: ArtifactPublisher,
+) -> None:
     partition = publisher._generate_hive_partition()
-    assert partition == "year=2026/month=08/day=14"
+
+    assert partition == "year=2026/month=08/day=27"
 
 
-def test_generate_hive_partition_invalid_date(publisher):
-    """Validates that malformed execution dates trigger a safe pipeline failure."""
-    object.__setattr__(publisher.config, 'execution_date', '14-08-2026')  # Wrong format
-    
-    with pytest.raises(CustomException):
+def test_generate_hive_partition_invalid_date(
+    publisher: ArtifactPublisher,
+) -> None:
+    publisher.config = ArtifactPublisherConfig(
+        publisher_root_dir=publisher.config.publisher_root_dir,
+        s3_bucket_name="b",
+        s3_monitoring_output_prefix="p",
+        s3_audit_reports_dir="a",
+        s3_action_tokens_dir="t",
+        s3_matured_evaluations_dir="m",
+        s3_metadata_dir="md",
+        run_id="run_123",
+        execution_date="invalid-date",
+    )
+
+    with pytest.raises(CustomException) as exc_info:
         publisher._generate_hive_partition()
 
+    assert "does not match format" in str(exc_info.value)
 
-def test_compile_master_metadata(publisher):
-    """
-    Validates that the publisher successfully aggregates metadata from all upstream
-    components into a single Master Execution Ledger JSON file.
-    """
-    # 1. Create dummy upstream metadata files
-    upstream_meta_paths = [
-        publisher.resolver_artifact.metadata_file_path,
-        publisher.drift_artifact.metadata_file_path,
-        publisher.performance_artifact.metadata_file_path,
-        publisher.rule_engine_artifact.metadata_file_path
+
+@patch(
+    "pipelines.monitoring_pipeline.src.components.artifact_publisher.write_json_file"
+)
+def test_compile_master_metadata(
+    mock_write_json: MagicMock,
+    publisher: ArtifactPublisher,
+) -> None:
+    master_path = publisher._compile_master_metadata()
+
+    assert master_path.endswith("master_metadata_run_123.json")
+    mock_write_json.assert_called_once()
+
+    saved_content = mock_write_json.call_args[1]["content"]
+
+    assert saved_content["orchestration"]["run_id"] == "run_123"
+    assert saved_content["orchestration"]["execution_date"] == "2026-08-27"
+    assert "components" in saved_content
+    assert (
+        "baseline_and_telemetry_resolver"
+        in saved_content["components"]
+    )
+    assert (
+        "statistical_drift_calculator"
+        in saved_content["components"]
+    )
+
+
+def test_load_json_missing_file(
+    publisher: ArtifactPublisher,
+) -> None:
+    data = publisher._load_json("/path/does/not/exist.json")
+
+    assert data == {}
+
+
+@patch("builtins.open")
+def test_load_json_invalid_format(
+    mock_open: MagicMock,
+    publisher: ArtifactPublisher,
+) -> None:
+    mock_open.return_value.__enter__.return_value.read.return_value = (
+        "invalid json"
+    )
+
+    with patch("os.path.exists", return_value=True):
+        with pytest.raises(CustomException) as exc_info:
+            publisher._load_json("dummy.json")
+
+        assert "Expecting value" in str(exc_info.value)
+
+
+def test_build_upload_map(
+    publisher: ArtifactPublisher,
+) -> None:
+    partition = "year=2026/month=08/day=27"
+    master_meta = "/tmp/master_metadata.json"
+
+    upload_map = publisher._build_upload_map(
+        partition,
+        master_meta,
+    )
+
+    assert len(upload_map) == 4
+
+    audit_uri = upload_map[
+        publisher.rule_engine_artifact.monitoring_report_file_path
     ]
-    
-    for i, path in enumerate(upstream_meta_paths):
-        with open(path, "w") as f:
-            json.dump({f"component_{i}": "success"}, f)
 
-    # 2. Compile master metadata
-    master_metadata_path = publisher._compile_master_metadata()
+    assert audit_uri == (
+        "s3://test-bucket/"
+        "monitoring_output/audit/"
+        "year=2026/month=08/day=27/"
+        "report_run_123.json"
+    )
 
-    # 3. Validate master ledger contents
-    assert os.path.exists(master_metadata_path)
-    with open(master_metadata_path, "r") as f:
-        master_data = json.load(f)
-        
-    assert "orchestration" in master_data
-    assert master_data["orchestration"]["run_id"] == publisher.config.run_id
-    assert "components" in master_data
-    assert "baseline_and_telemetry_resolver" in master_data["components"]
-    assert master_data["components"]["baseline_and_telemetry_resolver"]["component_0"] == "success"
+    token_uri = upload_map[
+        publisher.rule_engine_artifact.need_update_file_path
+    ]
 
+    assert token_uri == (
+        "s3://test-bucket/"
+        "monitoring_output/tokens/"
+        "year=2026/month=08/day=27/"
+        "need_update_run_123.json"
+    )
 
-def test_build_upload_map(publisher):
-    """Validates the correct generation of remote S3 URIs mapped from local file paths."""
-    partition_prefix = "year=2026/month=08/day=14"
-    master_metadata_path = "/dummy/master.json"
-    
-    upload_map = publisher._build_upload_map(partition_prefix, master_metadata_path)
-    
-    # Check that keys correspond to the expected local artifacts
-    assert publisher.rule_engine_artifact.monitoring_report_file_path in upload_map
-    assert publisher.rule_engine_artifact.need_update_file_path in upload_map
-    assert publisher.resolver_artifact.lookback_labels_file_path in upload_map
-    assert master_metadata_path in upload_map
-
-    # Check that values form proper S3 URIs
-    for s3_uri in upload_map.values():
-        assert s3_uri.startswith("s3://mock-bucket/monitoring_output/")
-        assert partition_prefix in s3_uri
-
-
-def test_validate_local_artifacts_missing_file(publisher):
-    """Validates that a missing mandatory artifact fails the pipeline fast before upload."""
-    invalid_paths = ["/invalid/path/1.json", "/invalid/path/2.json"]
-    
-    with pytest.raises(CustomException):
-        publisher._validate_local_artifacts(invalid_paths)
-
-
-def test_upload_single_file_invalid_scheme(publisher):
-    """Validates protocol enforcement for S3 uploads."""
-    local_path = "dummy.json"
-    invalid_uri = "gcs://mock-bucket/path/file.json"
-    
-    with pytest.raises(CustomException):
-        publisher._upload_single_file(local_path, invalid_uri)
-
-
-def test_artifact_publisher_run_e2e(publisher):
-    """
-    Validates the end-to-end component run. Creates necessary dummy files locally,
-    executes the run sequence, and asserts that boto3 upload is called properly.
-    """
-    # 1. Create dummy local files to pass validation
-    paths_to_create = [
-        publisher.resolver_artifact.metadata_file_path,
-        publisher.drift_artifact.metadata_file_path,
-        publisher.performance_artifact.metadata_file_path,
-        publisher.rule_engine_artifact.metadata_file_path,
-        publisher.rule_engine_artifact.monitoring_report_file_path,
-        publisher.rule_engine_artifact.need_update_file_path,
+    eval_uri = upload_map[
         publisher.resolver_artifact.lookback_labels_file_path
     ]
-    for path in paths_to_create:
-        # Ensure parent dirs exist just in case tmp_path is flat
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write("{}")
 
-    # 2. Execute Run
+    assert eval_uri == (
+        "s3://test-bucket/"
+        "monitoring_output/evals/"
+        "year=2026/month=08/day=27/"
+        "evaluation_run_123.parquet"
+    )
+
+    meta_uri = upload_map[master_meta]
+
+    assert meta_uri == (
+        "s3://test-bucket/"
+        "monitoring_output/meta/"
+        "year=2026/month=08/day=27/"
+        "metadata_run_123.json"
+    )
+
+
+@patch("os.path.exists", return_value=True)
+def test_validate_local_artifacts_success(
+    mock_exists: MagicMock,
+    publisher: ArtifactPublisher,
+) -> None:
+    publisher._validate_local_artifacts(
+        ["/path/1", "/path/2"]
+    )
+
+    assert mock_exists.call_count == 2
+
+
+@patch("os.path.exists", return_value=False)
+def test_validate_local_artifacts_missing(
+    mock_exists: MagicMock,
+    publisher: ArtifactPublisher,
+) -> None:
+    with pytest.raises(CustomException) as exc_info:
+        publisher._validate_local_artifacts(
+            ["/path/missing"]
+        )
+
+    assert "required artifacts are missing locally" in str(
+        exc_info.value
+    )
+
+
+def test_upload_single_file_success(
+    publisher: ArtifactPublisher,
+) -> None:
+    local_path = "/tmp/local_file.json"
+    s3_uri = "s3://my-bucket/my-prefix/file.json"
+
+    publisher._upload_single_file(
+        local_path,
+        s3_uri,
+    )
+
+    publisher.s3_client.upload_file.assert_called_once_with(
+        Filename=local_path,
+        Bucket="my-bucket",
+        Key="my-prefix/file.json",
+    )
+
+
+def test_upload_single_file_invalid_scheme(
+    publisher: ArtifactPublisher,
+) -> None:
+    with pytest.raises(CustomException) as exc_info:
+        publisher._upload_single_file(
+            "/tmp/file",
+            "gcs://bucket/file",
+        )
+
+    assert "Invalid S3 URI scheme" in str(exc_info.value)
+
+
+def test_upload_single_file_boto3_failure(
+    publisher: ArtifactPublisher,
+) -> None:
+    publisher.s3_client.upload_file.side_effect = Exception(
+        "S3 Access Denied"
+    )
+
+    with pytest.raises(CustomException) as exc_info:
+        publisher._upload_single_file(
+            "/tmp/file",
+            "s3://bucket/file",
+        )
+
+    assert "S3 Access Denied" in str(exc_info.value)
+
+
+@patch.object(ArtifactPublisher, "_generate_hive_partition")
+@patch.object(ArtifactPublisher, "_compile_master_metadata")
+@patch.object(ArtifactPublisher, "_build_upload_map")
+@patch.object(ArtifactPublisher, "_validate_local_artifacts")
+@patch.object(ArtifactPublisher, "_upload_artifacts")
+def test_run_success(
+    mock_upload: MagicMock,
+    mock_validate: MagicMock,
+    mock_build_map: MagicMock,
+    mock_compile_meta: MagicMock,
+    mock_gen_hive: MagicMock,
+    publisher: ArtifactPublisher,
+) -> None:
+    mock_gen_hive.return_value = "year=2026/month=08/day=27"
+    mock_compile_meta.return_value = "/tmp/master_meta.json"
+    mock_build_map.return_value = {
+        "/tmp/local": "s3://bucket/key"
+    }
+
+    mock_upload.return_value = {
+        "audit_report": "s3://audit",
+        "action_token": "s3://token",
+        "matured_evaluation": "s3://eval",
+        "metadata_ledger": "s3://meta",
+    }
+
     artifact = publisher.run()
 
-    # 3. Assert S3 Client Interactions
-    # Total uploads expected: audit_report, action_token, matured_evaluation, metadata_ledger
-    assert publisher.s3_client.upload_file.call_count == 4
-    
-    # Inspect arguments of a specific call (e.g., the action token upload)
-    upload_calls = publisher.s3_client.upload_file.call_args_list
-    bucket_args = [call.kwargs['Bucket'] for call in upload_calls]
-    key_args = [call.kwargs['Key'] for call in upload_calls]
-    
-    assert all(bucket == "mock-bucket" for bucket in bucket_args)
-    assert any("action_tokens" in key for key in key_args)
-    assert any("audit_reports" in key for key in key_args)
-    assert any("metadata" in key for key in key_args)
+    assert isinstance(artifact, ArtifactPublisherArtifact)
+    assert artifact.s3_audit_report_uri == "s3://audit"
+    assert artifact.s3_action_token_uri == "s3://token"
 
-    # 4. Validate output Artifact schema
-    assert artifact.s3_audit_report_uri.startswith("s3://")
-    assert artifact.s3_action_token_uri.startswith("s3://")
-    assert artifact.s3_matured_evaluation_uri.startswith("s3://")
-    assert artifact.s3_metadata_uri.startswith("s3://")
+    mock_gen_hive.assert_called_once()
+    mock_compile_meta.assert_called_once()
+    mock_build_map.assert_called_once()
+    mock_validate.assert_called_once()
+    mock_upload.assert_called_once()

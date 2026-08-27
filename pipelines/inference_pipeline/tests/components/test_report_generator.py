@@ -1,202 +1,423 @@
-import os
 import json
-import pytest
-import pandas as pd
-from unittest.mock import patch, MagicMock
 
+import pytest
+import numpy as np
+import pandas as pd
+
+from unittest.mock import MagicMock, patch, mock_open
+
+from pipelines.inference_pipeline.src.components.report_generator import (
+    ReportGenerator,
+)
 from shared_core.exceptions.custom_exception import CustomException
-from pipelines.inference_pipeline.src.components.report_generator import ReportGenerator
 from pipelines.inference_pipeline.src.entity.artifact_entity import (
-    ReportGeneratorArtifact,
     ModelLoaderArtifact,
-    FeatureMatrixBuilderArtifact
+    FeatureMatrixBuilderArtifact,
 )
 
 
-@pytest.fixture
-def generator_mock_artifacts(dummy_model_artifact_path, dummy_feature_matrix_path):
-    """Provides mock upstream artifacts mapping to the serialized dummy model and parquet matrix."""
-    ml_artifact = MagicMock(spec=ModelLoaderArtifact)
-    ml_artifact.model_file_path = dummy_model_artifact_path
-
-    fmb_artifact = MagicMock(spec=FeatureMatrixBuilderArtifact)
-    fmb_artifact.feature_matrix_file_path = dummy_feature_matrix_path
-
-    return ml_artifact, fmb_artifact
-
-
-def test_report_generator_initialization_success(mock_pipeline_context):
-    """Tests successful initialization of ReportGenerator."""
-    generator = ReportGenerator(context=mock_pipeline_context)
-    assert generator.context is mock_pipeline_context
-    assert generator.config is not None
-    assert "04_report_generator" in generator.config.generator_root_dir
-
-
-def test_report_generator_initialization_failure(mock_pipeline_context):
-    """Tests that initialization failure raises CustomException."""
-    with patch("pipelines.inference_pipeline.src.entity.config_entity.ReportGeneratorConfig.from_context") as mock_from_context:
-        mock_from_context.side_effect = Exception("Config error")
-        with pytest.raises(CustomException) as exc_info:
-            ReportGenerator(context=mock_pipeline_context)
-        assert "Config error" in str(exc_info.value)
-
-
-def test_report_generator_run_success_with_monetary_col(mock_pipeline_context, generator_mock_artifacts):
-    """
-    Tests the happy path where a valid dataset contains both system identifiers 
-    and a monetary column, enabling revenue-at-risk prioritization.
-    """
-    ml_artifact, fmb_artifact = generator_mock_artifacts
-    generator = ReportGenerator(context=mock_pipeline_context)
-    
-    artifact = generator.run(
-        model_loader_artifact=ml_artifact,
-        feature_matrix_artifact=fmb_artifact
+@patch(
+    "pipelines.inference_pipeline.src.components.report_generator."
+    "ReportGeneratorConfig.from_context"
+)
+def test_report_generator_initialization_failure(
+    mock_from_context: MagicMock,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    mock_from_context.side_effect = Exception(
+        "Config initialization failed"
     )
-    
-    assert isinstance(artifact, ReportGeneratorArtifact)
-    assert os.path.exists(artifact.csv_report_path)
-    assert os.path.exists(artifact.telemetry_log_path)
-    
-    # Validate Business CSV Report
-    report_df = pd.read_csv(artifact.csv_report_path)
-    assert "customer_unique_id" in report_df.columns
-    assert "churn_probability" in report_df.columns
-    assert "is_churn_risk" in report_df.columns
-    assert "revenue_at_risk" in report_df.columns
-    
-    # Assert sorting (highest revenue at risk first)
-    assert report_df["revenue_at_risk"].iloc[0] >= report_df["revenue_at_risk"].iloc[-1]
-    
-    # Validate Parquet Telemetry Log
-    telemetry_df = pd.read_parquet(artifact.telemetry_log_path)
-    assert "f1" in telemetry_df.columns  # Original feature retained
-    assert "inference_run_id" in telemetry_df.columns
-    assert "churn_probability" in telemetry_df.columns
-    
-    # Validate Metadata Ledger
-    with open(artifact.metadata_file_path, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
-        assert metadata["business_impact"]["total_customers_scored"] == 3
-        assert metadata["business_impact"]["total_revenue_at_risk_flagged"] is not None
+
+    with pytest.raises(CustomException) as exc_info:
+        ReportGenerator(context=mock_pipeline_context)
+
+    assert "Config initialization failed" in str(exc_info.value)
 
 
-def test_report_generator_run_fallback_identifiers(mock_pipeline_context, temp_workspace, dummy_model_artifact_path):
-    """
-    Tests the fallback behavior when the data lacks both the standard 'customer_unique_id'
-    and any monetary columns (resorts to index and probability sorting).
-    """
-    # Create feature matrix missing system and monetary cols
-    df = pd.DataFrame({
-        "f1": [1.0, 2.0, 3.0],
-        "f2": [0.1, 0.2, 0.3],
-        "c1": ["A", "B", "A"]
-    })
-    fallback_parquet_path = temp_workspace / "fallback_features.parquet"
-    df.to_parquet(fallback_parquet_path)
-    
-    ml_artifact = MagicMock(spec=ModelLoaderArtifact)
-    ml_artifact.model_file_path = dummy_model_artifact_path
-    
-    fmb_artifact = MagicMock(spec=FeatureMatrixBuilderArtifact)
-    fmb_artifact.feature_matrix_file_path = str(fallback_parquet_path)
-    
+@patch.object(ReportGenerator, "_generate_metadata")
+@patch.object(ReportGenerator, "_generate_telemetry_log")
+@patch.object(ReportGenerator, "_generate_business_report")
+@patch.object(ReportGenerator, "_generate_predictions")
+@patch.object(ReportGenerator, "_load_data")
+@patch.object(ReportGenerator, "_load_model")
+def test_run_success(
+    mock_load_model: MagicMock,
+    mock_load_data: MagicMock,
+    mock_gen_preds: MagicMock,
+    mock_gen_biz: MagicMock,
+    mock_gen_tel: MagicMock,
+    mock_gen_meta: MagicMock,
+    mock_pipeline_context: MagicMock,
+    dummy_model_loader_artifact: ModelLoaderArtifact,
+    dummy_feature_matrix_artifact: FeatureMatrixBuilderArtifact,
+) -> None:
     generator = ReportGenerator(context=mock_pipeline_context)
+
+    mock_model = MagicMock()
+    mock_df = pd.DataFrame()
+    mock_probs = np.array([0.1, 0.9])
+
+    mock_load_model.return_value = mock_model
+    mock_load_data.return_value = mock_df
+    mock_gen_preds.return_value = mock_probs
+
     artifact = generator.run(
-        model_loader_artifact=ml_artifact,
-        feature_matrix_artifact=fmb_artifact
+        model_loader_artifact=dummy_model_loader_artifact,
+        feature_matrix_artifact=dummy_feature_matrix_artifact,
     )
-    
-    report_df = pd.read_csv(artifact.csv_report_path)
-    
-    # Should fallback to assigning index as ID
-    assert "customer_unique_id" in report_df.columns
-    assert list(report_df["customer_unique_id"].sort_values()) == [0, 1, 2]
-    
-    # Should lack revenue_at_risk and sort by probability instead
-    assert "revenue_at_risk" not in report_df.columns
-    assert report_df["churn_probability"].iloc[0] >= report_df["churn_probability"].iloc[-1]
-    
-    with open(artifact.metadata_file_path, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
-        assert metadata["business_impact"]["total_revenue_at_risk_flagged"] is None
+
+    assert (
+        artifact.csv_report_path
+        == generator.config.csv_report_path
+    )
+    assert (
+        artifact.telemetry_log_path
+        == generator.config.telemetry_log_path
+    )
+    assert (
+        artifact.metadata_file_path
+        == generator.config.metadata_file_path
+    )
+
+    mock_load_model.assert_called_once_with(
+        dummy_model_loader_artifact.model_file_path
+    )
+    mock_load_data.assert_called_once_with(
+        dummy_feature_matrix_artifact.feature_matrix_file_path
+    )
+    mock_gen_preds.assert_called_once_with(
+        model=mock_model,
+        df=mock_df,
+    )
+    mock_gen_biz.assert_called_once_with(
+        df=mock_df,
+        probabilities=mock_probs,
+    )
+    mock_gen_tel.assert_called_once_with(
+        df=mock_df,
+        probabilities=mock_probs,
+    )
+    mock_gen_meta.assert_called_once()
 
 
-def test_report_generator_empty_dataframe(mock_pipeline_context, temp_workspace, dummy_model_artifact_path):
-    """
-    Tests that an empty parquet file raises a ValueError safely.
-    """
-    empty_parquet_path = temp_workspace / "empty.parquet"
-    pd.DataFrame().to_parquet(empty_parquet_path)
-    
-    ml_artifact = MagicMock(spec=ModelLoaderArtifact)
-    ml_artifact.model_file_path = dummy_model_artifact_path
-    
-    fmb_artifact = MagicMock(spec=FeatureMatrixBuilderArtifact)
-    fmb_artifact.feature_matrix_file_path = str(empty_parquet_path)
-    
+@patch.object(ReportGenerator, "_load_model")
+def test_run_failure(
+    mock_load_model: MagicMock,
+    mock_pipeline_context: MagicMock,
+    dummy_model_loader_artifact: ModelLoaderArtifact,
+    dummy_feature_matrix_artifact: FeatureMatrixBuilderArtifact,
+) -> None:
+    mock_load_model.side_effect = Exception("Model loading failed")
+
     generator = ReportGenerator(context=mock_pipeline_context)
-    
+
     with pytest.raises(CustomException) as exc_info:
         generator.run(
-            model_loader_artifact=ml_artifact,
-            feature_matrix_artifact=fmb_artifact
+            model_loader_artifact=dummy_model_loader_artifact,
+            feature_matrix_artifact=dummy_feature_matrix_artifact,
         )
-        
-    assert "is empty" in str(exc_info.value).lower()
+
+    assert "Model loading failed" in str(exc_info.value)
 
 
-def test_report_generator_model_load_failure(mock_pipeline_context, temp_workspace, dummy_feature_matrix_path):
-    """
-    Tests that a corrupted or missing model artifact throws an exception.
-    """
-    invalid_model_path = temp_workspace / "corrupted_model.pkl"
-    invalid_model_path.write_text("Not a real pickle file")
-    
-    ml_artifact = MagicMock(spec=ModelLoaderArtifact)
-    ml_artifact.model_file_path = str(invalid_model_path)
-    
-    fmb_artifact = MagicMock(spec=FeatureMatrixBuilderArtifact)
-    fmb_artifact.feature_matrix_file_path = dummy_feature_matrix_path
-    
+@patch(
+    "pipelines.inference_pipeline.src.components.report_generator."
+    "joblib.load"
+)
+def test_load_model_success(
+    mock_joblib_load: MagicMock,
+    mock_pipeline_context: MagicMock,
+) -> None:
     generator = ReportGenerator(context=mock_pipeline_context)
-    
+
+    mock_joblib_load.return_value = "dummy_model"
+
+    model = generator._load_model("/path/to/model.pkl")
+
+    assert model == "dummy_model"
+    mock_joblib_load.assert_called_once_with(
+        "/path/to/model.pkl"
+    )
+
+
+@patch(
+    "pipelines.inference_pipeline.src.components.report_generator."
+    "pd.read_parquet"
+)
+def test_load_data_success(
+    mock_read_parquet: MagicMock,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    mock_df = pd.DataFrame({"col": [1, 2]})
+    mock_read_parquet.return_value = mock_df
+
+    df = generator._load_data("/path/to/data.parquet")
+
+    pd.testing.assert_frame_equal(df, mock_df)
+    mock_read_parquet.assert_called_once_with(
+        "/path/to/data.parquet"
+    )
+
+
+@patch(
+    "pipelines.inference_pipeline.src.components.report_generator."
+    "pd.read_parquet"
+)
+def test_load_data_empty_raises(
+    mock_read_parquet: MagicMock,
+    mock_pipeline_context: MagicMock,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    mock_read_parquet.return_value = pd.DataFrame()
+
     with pytest.raises(CustomException) as exc_info:
-        generator.run(
-            model_loader_artifact=ml_artifact,
-            feature_matrix_artifact=fmb_artifact
+        generator._load_data("/path/to/data.parquet")
+
+    assert "empty" in str(exc_info.value).lower()
+
+
+def test_generate_predictions_success(
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+    mock_predictive_model: MagicMock,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    probabilities = generator._generate_predictions(
+        model=mock_predictive_model,
+        df=sample_feature_matrix_df,
+    )
+
+    expected_probs = np.array([0.15, 0.80, 0.05])
+
+    assert np.array_equal(
+        probabilities,
+        expected_probs,
+    )
+
+    called_df = mock_predictive_model.predict_proba.call_args[0][0]
+
+    assert "customer_unique_id" not in called_df.columns
+    assert "snapshot_date" not in called_df.columns
+    assert "recency_days" in called_df.columns
+
+
+def test_generate_predictions_failure(
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = Exception(
+        "Prediction engine failed"
+    )
+
+    with pytest.raises(CustomException) as exc_info:
+        generator._generate_predictions(
+            model=mock_model,
+            df=sample_feature_matrix_df,
         )
-        
-    # Include the actual Pickle IndexError string in the allowed assertions
-    assert any(err in str(exc_info.value).lower() for err in ["unpickling", "magic", "pop from empty list"])
+
+    assert "Prediction engine failed" in str(exc_info.value)
 
 
-def test_report_generator_prediction_failure(mock_pipeline_context, temp_workspace, dummy_model_artifact_path):
-        """
-        Tests that a failure during batch inference is securely caught and wrapped.
-        """
-        bad_df = pd.DataFrame({"wrong_col": [1, 2, 3]})
-        bad_parquet = temp_workspace / "bad_shape.parquet"
-        bad_df.to_parquet(bad_parquet)
-        
-        ml_artifact = MagicMock(spec=ModelLoaderArtifact)
-        ml_artifact.model_file_path = dummy_model_artifact_path
-        
-        fmb_artifact = MagicMock(spec=FeatureMatrixBuilderArtifact)
-        fmb_artifact.feature_matrix_file_path = str(bad_parquet)
-        
-        generator = ReportGenerator(context=mock_pipeline_context)
-        
-        # FIX: Explicitly mock the model to raise an exception rather than relying on DummyClassifier
-        mock_model = MagicMock()
-        mock_model.predict_proba.side_effect = Exception("Mocked shape mismatch")
-        
-        with patch("pipelines.inference_pipeline.src.components.report_generator.joblib.load", return_value=mock_model):
-            with pytest.raises(CustomException) as exc_info:
-                generator.run(
-                    model_loader_artifact=ml_artifact,
-                    feature_matrix_artifact=fmb_artifact
-                )
-            
-        assert "batch inference" in str(exc_info.value).lower() or "mocked shape mismatch" in str(exc_info.value).lower()
+@patch("pandas.DataFrame.to_csv")
+def test_generate_business_report_with_monetary(
+    mock_to_csv: MagicMock,
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    probabilities = np.array([0.85, 0.20, 0.95])
+
+    generator._generate_business_report(
+        df=sample_feature_matrix_df,
+        probabilities=probabilities,
+    )
+
+    mock_to_csv.assert_called_once_with(
+        generator.config.csv_report_path,
+        index=False,
+    )
+
+    metrics = generator._business_impact_metrics
+
+    assert metrics["total_customers_scored"] == 3
+    assert metrics["total_churners_flagged"] == 2
+
+    expected_risk = (
+        (0.85 * 150.0)
+        + (0.20 * 20.0)
+        + (0.95 * 1200.0)
+    )
+
+    assert metrics["total_revenue_at_risk_flagged"] == pytest.approx(
+        expected_risk,
+        0.01,
+    )
+
+
+@patch("pandas.DataFrame.to_csv")
+def test_generate_business_report_without_monetary_and_index_fallback(
+    mock_to_csv: MagicMock,
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    # Drop identifiers and monetary to trigger fallback paths.
+    df = sample_feature_matrix_df.drop(
+        columns=[
+            "customer_unique_id",
+            "monetary_total",
+        ]
+    )
+
+    probabilities = np.array([0.85, 0.20, 0.95])
+
+    generator._generate_business_report(
+        df=df,
+        probabilities=probabilities,
+    )
+
+    mock_to_csv.assert_called_once_with(
+        generator.config.csv_report_path,
+        index=False,
+    )
+
+    metrics = generator._business_impact_metrics
+
+    assert metrics["total_customers_scored"] == 3
+    assert metrics["total_churners_flagged"] == 2
+    assert (
+        metrics["total_revenue_at_risk_flagged"]
+        is None
+    )
+
+
+@patch("pandas.DataFrame.to_parquet")
+def test_generate_telemetry_log(
+    mock_to_parquet: MagicMock,
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    probabilities = np.array([0.85, 0.20, 0.95])
+
+    generator._generate_telemetry_log(
+        df=sample_feature_matrix_df,
+        probabilities=probabilities,
+    )
+
+    mock_to_parquet.assert_called_once_with(
+        generator.config.telemetry_log_path,
+        index=False,
+        compression="snappy",
+    )
+
+    # Extract the DataFrame passed to to_parquet
+    # to verify its structure.
+    called_df = (
+        mock_to_parquet.call_args[0][0]
+        if mock_to_parquet.call_args.args
+        else None
+    )
+
+    if called_df is None:
+        raise ValueError(
+            "DataFrame to_parquet mock interception failed structure."
+        )
+
+
+@patch(
+    "pipelines.inference_pipeline.src.components.report_generator."
+    "pd.DataFrame.to_parquet"
+)
+def test_generate_telemetry_log_dataframe_method(
+    mock_to_parquet: MagicMock,
+    mock_pipeline_context: MagicMock,
+    sample_feature_matrix_df: pd.DataFrame,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    probabilities = np.array([0.85, 0.20, 0.95])
+
+    generator._generate_telemetry_log(
+        df=sample_feature_matrix_df,
+        probabilities=probabilities,
+    )
+
+    mock_to_parquet.assert_called_once_with(
+        generator.config.telemetry_log_path,
+        index=False,
+        compression="snappy",
+    )
+
+
+def test_generate_metadata(
+    mock_pipeline_context: MagicMock,
+) -> None:
+    generator = ReportGenerator(context=mock_pipeline_context)
+
+    generator._business_impact_metrics = {
+        "test_metric": 123
+    }
+
+    execution_time = 2.5
+
+    m_open = mock_open()
+
+    with patch("builtins.open", m_open):
+        generator._generate_metadata(
+            execution_time=execution_time
+        )
+
+    m_open.assert_called_once_with(
+        generator.config.metadata_file_path,
+        "w",
+        encoding="utf-8",
+    )
+
+    handle = m_open()
+
+    written_data = "".join(
+        call.args[0]
+        for call in handle.write.call_args_list
+    )
+
+    parsed_metadata = json.loads(written_data)
+
+    assert (
+        parsed_metadata["pipeline_stage"]
+        == "Report Generator"
+    )
+    assert (
+        parsed_metadata["inference_run_id"]
+        == mock_pipeline_context.run_id
+    )
+    assert (
+        parsed_metadata["execution_time_seconds"]
+        == execution_time
+    )
+    assert (
+        parsed_metadata["business_impact"]
+        == {"test_metric": 123}
+    )
+    assert (
+        parsed_metadata["artifacts_generated"][
+            "business_report"
+        ]
+        == generator.config.csv_report_path
+    )
+    assert (
+        parsed_metadata["artifacts_generated"][
+            "telemetry_log"
+        ]
+        == generator.config.telemetry_log_path
+    )

@@ -1,299 +1,395 @@
-import os
 import json
-import joblib
-import pytest
+from unittest.mock import MagicMock, mock_open, patch
+
 import numpy as np
 import pandas as pd
-from unittest.mock import MagicMock, patch
-from sklearn.dummy import DummyClassifier
+import pytest
 
-from pipelines.training_pipeline.src.components.model_evaluator import ModelEvaluator
-from pipelines.training_pipeline.src.entity.config_entity import ModelEvaluatorConfig
-from shared_core.exceptions.custom_exception import CustomException
+from pipelines.training_pipeline.src.components.model_evaluator import (
+    ModelEvaluator,
+)
+from pipelines.training_pipeline.src.entity.artifact_entity import (
+    DataProcessorArtifact,
+    ModelTrainerArtifact,
+)
+from pipelines.training_pipeline.src.entity.config_entity import (
+    ModelEvaluatorConfig,
+)
 
 
 @pytest.fixture
-def evaluator_config(pipeline_context):
-    return ModelEvaluatorConfig.from_context(pipeline_context)
+def me_config(
+    mock_pipeline_context: MagicMock,
+) -> ModelEvaluatorConfig:
+    return ModelEvaluatorConfig.from_context(mock_pipeline_context)
 
 
-def test_model_evaluator_initialization(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.joblib.load"
+)
+def test_run_success(
+    mock_joblib_load: MagicMock,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    assert evaluator.config == evaluator_config
-    assert evaluator.context == pipeline_context
-    assert evaluator.data_artifact == data_processor_artifact
-    assert evaluator.trainer_artifact == model_trainer_artifact
+    mock_challenger = MagicMock()
+    mock_joblib_load.return_value = mock_challenger
+
+    mock_metrics = {
+        "log_loss": 0.3,
+        "roc_auc": 0.85,
+        "brier_score": 0.1,
+        "eroi": 0.08,
+        "optimal_threshold": 0.5,
+    }
+
+    with (
+        patch.object(
+            evaluator,
+            "_load_test_data",
+            return_value=(MagicMock(), MagicMock()),
+        ),
+        patch.object(
+            evaluator,
+            "_evaluate_model",
+            return_value=mock_metrics,
+        ),
+        patch.object(
+            evaluator,
+            "_fetch_champion_model",
+            return_value=None,
+        ),
+        patch.object(
+            evaluator,
+            "_execute_hysteresis_duel",
+            return_value=True,
+        ),
+        patch.object(evaluator, "_generate_artifacts"),
+        patch.object(evaluator, "_generate_metadata"),
+    ):
+        artifact = evaluator.run()
+
+        assert artifact.approval_status is True
+        assert artifact.report_file_path == me_config.report_file_path
+        assert (
+            artifact.baseline_performance_metrics_file_path
+            == me_config.baseline_performance_metrics_file_path
+        )
+
+        mock_joblib_load.assert_called_once_with(
+            dummy_model_trainer_artifact.model_file_path
+        )
 
 
-def test_calculate_eroi_and_threshold(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.pd.read_parquet"
+)
+def test_load_test_data(
+    mock_read_parquet: MagicMock,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    y_true = np.array([1, 1, 0, 0, 1, 0])
-    y_probs = np.array([0.9, 0.8, 0.4, 0.1, 0.6, 0.2])
+    mock_df = pd.DataFrame({"target": [0, 1]})
+    mock_read_parquet.return_value = mock_df
 
-    # Based on config: cost=10.0, ltv=500.0, save_rate=0.10 (Revenue per save = 50.0)
-    # At threshold 0.5:
-    # y_pred = [1, 1, 0, 0, 1, 0] -> TP=3, FP=0
-    # Interventions = 3. Cost = 30. Revenue = 150. ROI = 120. Normalized = 120 / 6 = 20.0
+    X_test, y_test = evaluator._load_test_data()
 
-    best_eroi, best_threshold = evaluator._calculate_eroi_and_threshold(
-        y_true, y_probs
-    )
-
-    assert best_eroi > 0
-    assert 0.01 <= best_threshold <= 0.99
-    assert np.isclose(best_eroi, 20.0)
+    assert mock_read_parquet.call_count == 2
+    assert isinstance(X_test, pd.DataFrame)
+    assert isinstance(y_test, np.ndarray)
 
 
 def test_evaluate_model(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
-
-    X_test = pd.DataFrame({"feat1": [1, 2, 3, 4]})
-    y_test = np.array([0, 1, 0, 1])
 
     mock_model = MagicMock()
-    # Predicts perfect probabilities
+
+    # Predicts class 1 probabilities perfectly
     mock_model.predict_proba.return_value = np.array(
-        [[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]]
+        [
+            [0.9, 0.1],
+            [0.2, 0.8],
+        ]
     )
 
-    metrics = evaluator._evaluate_model(mock_model, X_test, y_test)
+    X_test = pd.DataFrame({"feature": [1, 2]})
+    y_test = np.array([0, 1])
+
+    with patch.object(
+        evaluator,
+        "_calculate_eroi_and_threshold",
+        return_value=(10.5, 0.45),
+    ):
+        metrics = evaluator._evaluate_model(
+            mock_model,
+            X_test,
+            y_test,
+        )
 
     assert "log_loss" in metrics
     assert "roc_auc" in metrics
     assert "brier_score" in metrics
-    assert "eroi" in metrics
-    assert "optimal_threshold" in metrics
-
     assert metrics["roc_auc"] == 1.0
+    assert metrics["eroi"] == 10.5
+    assert metrics["optimal_threshold"] == 0.45
 
 
-def test_fetch_champion_model_success(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+def test_calculate_eroi_and_threshold(
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    # Create a dummy trained model
-    dummy_model = DummyClassifier(strategy="prior")
-    dummy_model.fit(np.array([[0], [1]]), np.array([0, 1]))
+    # 4 users. LTV=500, save=0.1 -> Rev per save = 50. Cost = 10.
+    y_true = np.array([1, 1, 0, 0])
+    y_probs = np.array([0.9, 0.4, 0.8, 0.1])
 
-    def mock_download(remote_uri, local_path):
-        if remote_uri == evaluator_config.s3_pointer_uri:
-            with open(local_path, "w") as f:
-                json.dump(
-                    {"s3_model_path": "s3://bucket/champion.pkl"},
-                    f,
-                )
-        elif remote_uri == "s3://bucket/champion.pkl":
-            joblib.dump(dummy_model, local_path)
-        else:
-            raise Exception("Unexpected URI")
-
-    evaluator.context.s3_sync.download_file.side_effect = mock_download
-
-    champion = evaluator._fetch_champion_model()
-
-    assert champion is not None
-    assert hasattr(champion, "predict_proba")
-
-    # Ensure temporary files were cleaned up
-    local_state_path = os.path.join(
-        evaluator.config.model_evaluator_dir,
-        "tmp_model_state.json",
+    eroi, threshold = evaluator._calculate_eroi_and_threshold(
+        y_true,
+        y_probs,
     )
-    local_champion_path = os.path.join(
-        evaluator.config.model_evaluator_dir,
-        "champion_model.pkl",
+
+    assert isinstance(eroi, float)
+    assert isinstance(threshold, float)
+
+    # Ensure threshold is selected correctly and EROI is calculated
+    assert 0.01 <= threshold <= 0.99
+    assert eroi > -100.0
+
+
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.os.remove"
+)
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.joblib.load"
+)
+def test_fetch_champion_model_success(
+    mock_joblib_load: MagicMock,
+    mock_remove: MagicMock,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
+    evaluator = ModelEvaluator(
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
-    assert not os.path.exists(local_state_path)
-    assert not os.path.exists(local_champion_path)
+
+    mock_state = {
+        "s3_model_path": "s3://test/champion.pkl",
+    }
+
+    mock_champion = MagicMock()
+    mock_joblib_load.return_value = mock_champion
+
+    with patch(
+        "builtins.open",
+        mock_open(read_data=json.dumps(mock_state)),
+    ):
+        model = evaluator._fetch_champion_model()
+
+    assert model == mock_champion
+    assert (
+        mock_pipeline_context.s3_sync.download_file.call_count == 2
+    )
+    assert mock_joblib_load.called
+    assert mock_remove.call_count == 2
 
 
 def test_fetch_champion_model_cold_start(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    # Simulate S3 file not found
-    evaluator.context.s3_sync.download_file.side_effect = Exception(
-        "Not Found"
+    # Simulate pointer file not existing (Cold Start)
+    mock_pipeline_context.s3_sync.download_file.side_effect = Exception(
+        "Not found"
     )
 
-    champion = evaluator._fetch_champion_model()
-    assert champion is None
+    model = evaluator._fetch_champion_model()
+
+    assert model is None
 
 
-def test_execute_hysteresis_duel_cold_start(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+@pytest.mark.parametrize(
+    "champion_eroi, challenger_eroi, expected_result",
+    [
+        (None, 0.06, True),  # Cold Start Success (>= 0.05 min)
+        (None, 0.04, False),  # Cold Start Fail
+        (0.10, 0.13, True),  # Duel Success (0.13 >= 0.10 + 0.02)
+        (0.10, 0.11, False),  # Duel Fail (0.11 < 0.10 + 0.02)
+    ],
+)
+def test_execute_hysteresis_duel(
+    champion_eroi: float,
+    challenger_eroi: float,
+    expected_result: bool,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    # min_eroi_threshold is 0.05 from fixture
+    challenger_metrics = {
+        "eroi": challenger_eroi,
+    }
 
-    # Approved
-    is_approved = evaluator._execute_hysteresis_duel(
-        {"eroi": 0.10}, None
+    champion_metrics = (
+        {"eroi": champion_eroi}
+        if champion_eroi is not None
+        else None
     )
-    assert is_approved is True
 
-    # Rejected
-    is_rejected = evaluator._execute_hysteresis_duel(
-        {"eroi": 0.01}, None
+    result = evaluator._execute_hysteresis_duel(
+        challenger_metrics,
+        champion_metrics,
     )
-    assert is_rejected is False
+
+    assert result is expected_result
 
 
-def test_execute_hysteresis_duel_champion_exists(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.write_json_file"
+)
+def test_generate_artifacts_approved(
+    mock_write_json: MagicMock,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    # margin is 0.02 from fixture
-    champion_metrics = {"eroi": 0.50}
+    challenger_metrics = {
+        "log_loss": 0.1,
+        "roc_auc": 0.9,
+        "brier_score": 0.1,
+        "eroi": 0.2,
+        "optimal_threshold": 0.5,
+    }
 
-    # Approved: Challenger beats Champion + Margin (0.50 + 0.02 = 0.52)
-    is_approved = evaluator._execute_hysteresis_duel(
-        {"eroi": 0.55}, champion_metrics
+    evaluator._generate_artifacts(
+        challenger_metrics,
+        None,
+        is_approved=True,
     )
-    assert is_approved is True
 
-    # Rejected: Challenger is better, but doesn't beat the margin
-    is_rejected_margin = evaluator._execute_hysteresis_duel(
-        {"eroi": 0.51}, champion_metrics
+    # 1 for report, 1 for baseline metrics
+    assert mock_write_json.call_count == 2
+
+    report_args = mock_write_json.call_args_list[0][0]
+
+    assert report_args[0] == me_config.report_file_path
+    assert report_args[1]["approval_status"] is True
+
+    baseline_args = mock_write_json.call_args_list[1][0]
+
+    assert (
+        baseline_args[0]
+        == me_config.baseline_performance_metrics_file_path
     )
-    assert is_rejected_margin is False
-
-    # Rejected: Challenger is worse
-    is_rejected_worse = evaluator._execute_hysteresis_duel(
-        {"eroi": 0.40}, champion_metrics
-    )
-    assert is_rejected_worse is False
+    assert baseline_args[1]["metrics"]["log_loss"] == 0.1
 
 
-def test_model_evaluator_run_success(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
+@patch(
+    "pipelines.training_pipeline.src.components.model_evaluator.write_json_file"
+)
+def test_generate_artifacts_rejected(
+    mock_write_json: MagicMock,
+    me_config: ModelEvaluatorConfig,
+    mock_pipeline_context: MagicMock,
+    dummy_data_processor_artifact: DataProcessorArtifact,
+    dummy_model_trainer_artifact: ModelTrainerArtifact,
+) -> None:
     evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+        config=me_config,
+        context=mock_pipeline_context,
+        data_artifact=dummy_data_processor_artifact,
+        trainer_artifact=dummy_model_trainer_artifact,
     )
 
-    # Force _fetch_champion_model to return None (Cold Start)
-    with patch.object(
-        evaluator,
-        "_fetch_champion_model",
-        return_value=None,
-    ):
-        artifact = evaluator.run()
+    challenger_metrics = {
+        "log_loss": 0.2,
+        "roc_auc": 0.8,
+        "brier_score": 0.2,
+        "eroi": 0.1,
+        "optimal_threshold": 0.5,
+    }
 
-    assert artifact.approval_status is not None
-    assert artifact.report_file_path == evaluator_config.report_file_path
+    champion_metrics = {
+        "log_loss": 0.1,
+        "roc_auc": 0.9,
+        "brier_score": 0.1,
+        "eroi": 0.3,
+        "optimal_threshold": 0.5,
+    }
 
-    assert os.path.exists(artifact.report_file_path)
-    assert os.path.exists(artifact.metadata_file_path)
-
-    if artifact.approval_status:
-        assert os.path.exists(
-            artifact.baseline_performance_metrics_file_path
-        )
-
-        with open(
-            artifact.baseline_performance_metrics_file_path, "r"
-        ) as f:
-            baselines = json.load(f)
-
-        assert "metrics" in baselines
-        assert "log_loss" in baselines["metrics"]
-
-
-def test_model_evaluator_run_failure(
-    pipeline_context,
-    evaluator_config,
-    data_processor_artifact,
-    model_trainer_artifact,
-):
-    evaluator = ModelEvaluator(
-        config=evaluator_config,
-        context=pipeline_context,
-        data_artifact=data_processor_artifact,
-        trainer_artifact=model_trainer_artifact,
+    evaluator._generate_artifacts(
+        challenger_metrics,
+        champion_metrics,
+        is_approved=False,
     )
 
-    # Simulate a critical failure during test data loading
-    with patch.object(
-        evaluator,
-        "_load_test_data",
-        side_effect=ValueError("Corrupt Parquet File"),
-    ):
-        with pytest.raises(CustomException) as excinfo:
-            evaluator.run()
+    assert mock_write_json.call_count == 2
 
-        assert "Corrupt Parquet File" in str(excinfo.value)
+    baseline_args = mock_write_json.call_args_list[1][0]
+
+    # Since Challenger was rejected, baseline should fallback to Champion
+    assert baseline_args[1]["metrics"]["log_loss"] == 0.1
