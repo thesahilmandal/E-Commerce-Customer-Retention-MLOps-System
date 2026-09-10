@@ -14,57 +14,7 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 
 ## System Architecture
 
-```mermaid
-flowchart TD
-    subgraph Control_Plane [GitHub Actions: Master Orchestrator & CI/CD]
-        CRON((Nightly Cron))
-        INIT[Initialize Temporal Windows & Run ID]
-        GATE{Decision Gate: Parse Action Token}
-        
-        CRON --> INIT
-        INIT --> INF
-    end
-
-    subgraph Container_Layer [Dockerized ML Pipelines]
-        INF[3. Inference Pipeline]
-        MON[4. Monitoring Pipeline]
-        DAT[1. Data Pipeline]
-        TRN[2. Training Pipeline]
-    end
-
-    subgraph Data_Plane [Amazon S3: State & Data Layer]
-        REG[(Model Registry & State)]
-        DL[(Data Lake: Bronze Data)]
-        FS[(Feature Store: ABT)]
-        RPT[Business Reports & Telemetry]
-        TOK[Action Token / Ledger]
-    end
-
-    %% Inference Flow
-    INF -- Fetch Champion Model --> REG
-    INF -- Read T-1 Data --> DL
-    INF -- Write Parquet/CSV --> RPT
-    INF --> MON
-    
-    %% Monitoring Flow
-    MON -- Read Telemetry --> RPT
-    MON -- Read T-30 Labels --> DL
-    MON -- Write need_update.json --> TOK
-    MON --> GATE
-    
-    %% Decision Flow
-    GATE -- Poll Token --> TOK
-    GATE -- If need_update == True --> DAT
-    GATE -- If Model Healthy --> END((Job Ends))
-    
-    %% Retraining Flow
-    DAT -- Out-of-Core Joins --> DL
-    DAT -- Materialize Parquet --> FS
-    DAT --> TRN
-    TRN -- Read ABT --> FS
-    TRN -- Atomic WORM Overwrite --> REG
-
-```
+![Enterprise SaaS Customer Churn Risk ML System Architecture](docs/images/system-architecture.png)
 
 ---
 
@@ -207,33 +157,28 @@ source venv/bin/activate
 # Install pipeline dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
-
 ```
 
 ### 2. AWS Prerequisites & Configuration
 
 1. Authenticate your local AWS CLI environment:
+
 ```bash
 aws configure
-
 ```
 
-
 2. Provision two S3 buckets in your AWS account and map their **names** (not URIs) in a local `.env` file at the repository root:
+
 ```env
 S3_CUSTOMER_DATABASE="<YOUR_CUSTOMER_DATABASE_BUCKET_NAME>"
 S3_PIPELINE_RUN_ARTIFACTS="<YOUR_ARTIFACTS_BUCKET_NAME>"
-
 ```
-
 
 3. Load the environment variables into your current shell session:
+
 ```bash
 set -a && source .env && set +a
-
 ```
-
-
 
 ### 3. Bootstrapping the Data Lake (Simulated Production Data)
 
@@ -245,7 +190,6 @@ python -m tools.raw_data_loader
 
 # 2. Transform into Hive-partitioned format and migrate to the Customer Database bucket
 python -m tools.hive_partitioned_generator
-
 ```
 
 ### 4. Local Pipeline Execution (End-to-End Test)
@@ -278,7 +222,6 @@ python -m pipelines.inference_pipeline.src.runner \
 python -m pipelines.monitoring_pipeline.src.runner \
   --run-id="testing_01" \
   --execution-date="$(date +%Y-%m-%d)"
-
 ```
 
 ### 5. Cloud Deployment via GitHub Actions
@@ -287,6 +230,7 @@ To orchestrate the system autonomously in the cloud via the provided CI/CD and M
 
 1. **AWS Infrastructure:** Create an OIDC Identity Provider in AWS IAM connected to your GitHub repository. Provision four Amazon ECR repositories to host the pipeline images.
 2. **GitHub Repository Variables:** Configure the following repository variables (not secrets) in your GitHub repository settings:
+
 * `AWS_REGION`
 * `AWS_ROLE_ARN` *(The IAM role assumable via OIDC)*
 * `ECR_DATA_PIPELINE` *(Name of the Data ECR repository, not the URI)*
@@ -296,12 +240,10 @@ To orchestrate the system autonomously in the cloud via the provided CI/CD and M
 * `S3_PIPELINE_RUN_ARTIFACTS` *(Name of the Artifacts S3 bucket, not the URI)*
 * `S3_CUSTOMER_DATABASE` *(Name of the Database S3 bucket, not the URI)*
 
-
 3. **Workflow Execution:** Push changes to the `main` branch. Navigate to the GitHub Actions tab. You must manually trigger the deployment workflows in this strict order for the initial run:
+
 * **First:** Run **Continuous Deployment** (`cd.yml`) to build and push all Docker images to ECR.
 * **Second:** Run **Master Orchestrator** (`master_orchestrator.yml`) to execute the nightly batch DAG.
-
-
 
 ---
 
@@ -314,6 +256,9 @@ To orchestrate the system autonomously in the cloud via the provided CI/CD and M
 │       ├── ci.yml                        # Code quality & testing
 │       ├── cd.yml                        # Build & push to ECR
 │       └── master_orchestrator.yml       # Production ML orchestration DAG
+├── docs/
+│   └── images/
+│       └── system-architecture.png       # System architecture diagram
 ├── pipelines/
 │   ├── data_pipeline/
 │   │   ├── configs/                      # YAML definition files
@@ -345,5 +290,4 @@ To orchestrate the system autonomously in the cloud via the provided CI/CD and M
 ├── .gitignore
 ├── requirements.txt
 └── README.md
-
 ```
