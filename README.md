@@ -1,4 +1,4 @@
-# Enterprise SaaS Customer Churn Risk ML System
+# E-Commerce-Customer-Retention ML System
 
 ## Executive Overview & Business Value
 
