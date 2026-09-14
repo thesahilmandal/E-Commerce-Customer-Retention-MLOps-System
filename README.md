@@ -1,12 +1,12 @@
-# E-Commerce-Customer-Retention ML System
+# E-Commerce Customer Retention MLOps System
 
 ## Executive Overview & Business Value
 
-Customer retention is structurally more cost-effective than acquisition. This system is an end-to-end, production-oriented Machine Learning engineering platform designed to answer a core business question: *Which existing customers are both valuable to the business and at high risk of churn?*
+Customer retention is structurally more cost-effective than acquisition. This system is an end-to-end, production-oriented Machine Learning engineering platform designed to answer a core business question: *Which existing customers are both valuable to the business and at high risk of lapsing?*
 
 Rather than being a simple predictive model, this is a decoupled, event-driven **MLOps orchestration system**. It automates daily batch inference, executes defensive statistical monitoring, and dynamically triggers conditional model retraining only when statistically or financially justified. By continuously prioritizing customers based on *Revenue at Risk*, the system ensures that retention teams act on accurate, statistically sound, and financially calibrated signals.
 
-**Note on Simulation Data:** While the system architecture is engineered for subscription-based SaaS telemetry (contractual churn), the publicly demonstrable implementation utilizes the Brazilian Olist E-Commerce dataset as an open-source proxy, modeling customer retention via temporal inactivity windows.
+**Dataset & Problem Framing:** The system utilizes the Brazilian Olist E-Commerce dataset, modeling customer retention within a non-contractual setting. Rather than relying on explicit cancellation events (contractual churn), customer churn is defined via temporal inactivity windows (customers with no repeat purchase within a defined observation window), combined with RFM (Recency, Frequency, Monetary) behavioral signals.
 
 **Engineering Identity:** This system adheres to strict enterprise software engineering principles. It leverages **idempotent** execution boundaries, **out-of-core** data processing to prevent memory bottlenecks, **point-in-time correctness** to eliminate target leakage, and **OIDC-secured**, automated orchestration. It treats ML models not as standalone assets, but as versioned, strictly schema-enforced artifacts governed by a fail-fast CI/CD control plane and an immutable Amazon S3 data plane.
 
@@ -14,7 +14,8 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 
 ## System Architecture
 
-![Enterprise SaaS Customer Churn Risk ML System Architecture](docs/images/system-architecture.png)
+![E-Commerce Customer Retention MLOps System Architecture](docs/images/system-architecture.png)
+
 
 ---
 
@@ -25,14 +26,14 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 **Engineering Highlights:**
 
 * **Direct S3-to-S3 Streaming:** Utilizes DuckDB with the `httpfs` extension to read raw data, execute memory-efficient out-of-core joins, and `COPY` the compressed Parquet artifact directly to the Feature Store. This entirely bypasses local container disk I/O bottlenecks.
-* **Point-in-Time Correctness:** The `SharedFeatureGenerator` enforces strict temporal bounding via SQL, explicitly masking future delivery timestamps and status updates relative to the pipeline's execution `end_date` to mathematically guarantee zero target leakage.
-* **Strongly Typed Configuration:** Execution parameters, compute limits (e.g., 4 threads, 8GB memory cap), and business logic (e.g., 180-day churn window) are injected via parsed, immutable YAML dataclasses.
+* **Point-in-Time Correctness:** The `SharedFeatureGenerator` enforces strict temporal bounding via SQL, explicitly masking future order timestamps and status updates relative to the pipeline's execution `end_date` to mathematically guarantee zero target leakage.
+* **Strongly Typed Configuration:** Execution parameters, compute limits (e.g., 4 threads, 8GB memory cap), and business logic (e.g., 180-day inactivity window) are injected via parsed, immutable YAML dataclasses.
 
 **Execution Flow:**
 
 1. **Fail-Fast Data Discovery:** Translates the requested temporal window into expected S3 Hive partitions (`year=YYYY/month=MM`) and executes highly efficient `MaxKeys=1` Boto3 queries. Fails immediately if upstream partitions are missing, saving compute resources.
 2. **Out-of-Core Validation:** Runs structural schema, record count, and critical non-null checks directly against the S3 data lake before feature engineering begins.
-3. **Feature Materialization:** Aggregates behavioral, RFM (Recency, Frequency, Monetary), and operational features, joining them with forward-looking target variables (Churn and 180-day LTV).
+3. **Feature Materialization:** Aggregates behavioral, RFM, and operational features, joining them with forward-looking target variables (Churn and 180-day LTV).
 4. **Metadata Registry:** Extracts deterministic telemetry (row counts, schema MD5 hashes) directly from the finalized Parquet file via S3, publishing a standardized JSON contract for downstream pipelines.
 
 ---
@@ -45,15 +46,15 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 
 * **Strict Training-Serving Parity:** Implements a custom Scikit-Learn `CategoricalSchemaEnforcer` that learns exact dataset schemas and rigidly enforces Pandas categorical dtypes to prevent unseen-category exceptions during inference.
 * **Probability Calibration:** Wraps the base XGBoost estimator in a `CalibratedClassifierCV` (Isotonic regression). This guarantees that output scores are true real-world probabilities, which is mathematically required for accurate downstream financial calculations.
-* **Scikit-Learn Mega-Pipeline:** Bundles the stateful schema enforcer and the calibrated model into a single serialized `model.pkl` artifact, ensuring data transformations and inference logic are strictly coupled.
-* **Atomic Two-Phase Commit:** Deploys models using a zero-downtime, rollback-ready S3 architecture. Artifacts are written to an immutable WORM (Write-Once-Read-Many) vault, followed by an atomic overwrite of a global `model_state.json` routing pointer.
+* **Unified Scikit-Learn Pipeline:** Bundles the stateful schema enforcer and the calibrated model into a single serialized `model.pkl` artifact, ensuring data preprocessing and inference logic are strictly coupled without leakage.
+* **Atomic S3 Pointer Updates:** Deploys models using a zero-downtime, rollback-ready S3 architecture. Artifacts are written to an immutable WORM (Write-Once-Read-Many) vault, followed by an atomic overwrite of a global `model_state.json` routing pointer.
 
 **Execution Flow:**
 
-1. **Out-of-Core Processing:** Utilizes DuckDB to stream the massive Master Panel dataset directly from S3, performing a memory-efficient random split (Train/Val/Test) and writing fragments to local disk to prevent OOM errors.
+1. **Out-of-Core Processing:** Utilizes DuckDB to stream the Master Panel dataset directly from S3, performing a memory-efficient random split (Train/Val/Test) and writing fragments to local disk to prevent OOM errors.
 2. **Hyperparameter Optimization:** Executes a Bayesian search via Optuna (`TPESampler`) with strict early stopping to discover the optimal XGBoost configuration within the defined search space.
 3. **Explainability & Telemetry:** Generates global SHAP feature importance artifacts (from the uncalibrated base model) and extracts reference feature statistical distributions for downstream Data Drift monitoring.
-4. **The Hysteresis Duel (Business Gatekeeper):** Evaluates the new Challenger model against the holdout Test set by executing a threshold sweep to maximize Expected ROI (EROI). Fetches the active Champion model from S3 and compares them. The Challenger is only deployed if its EROI beats the Champion by a strictly defined configuration margin (`eroi_hysteresis_margin`), preventing trivial model churn.
+4. **Champion-Challenger Hysteresis Gatekeeper:** Evaluates the new Challenger model against the holdout Test set by executing a threshold sweep to maximize Expected ROI (EROI). Fetches the active Champion model from S3 and compares them. The Challenger is only deployed if its EROI beats the Champion by a strictly defined configuration margin (`eroi_hysteresis_margin`), preventing trivial model thrashing.
 
 ---
 
@@ -63,7 +64,7 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 
 **Engineering Highlights:**
 
-* **Zero Training-Serving Skew:** Reuses the exact same `SharedFeatureGenerator` utility from the Training Pipeline. Features are materialized out-of-core via DuckDB, mathematically guaranteeing that SQL inference logic perfectly matches Python training logic.
+* **Zero Training-Serving Skew:** Reuses the exact same `SharedFeatureGenerator` utility from the Training Pipeline. Features are materialized out-of-core via DuckDB, mathematically guaranteeing that SQL feature logic remains identical across training and batch inference.
 * **Fail-Fast Data Contracts:** Implements a strict `InferenceValidator` Gatekeeper. Before any scoring occurs, the pipeline dynamically compares the newly materialized feature matrix schema against the serialized JSON blueprint of the Champion model. If required predictive features or entity mappings are missing, the pipeline halts gracefully to prevent silent failures.
 * **Financial Risk Prioritization:** Beyond outputting raw probabilities, the pipeline dynamically calculates `revenue_at_risk` (Churn Probability × Customer LTV/Monetary Value), sorting the final output so retention teams focus on the highest financial impact first.
 * **Master Inference Ledger:** Consolidates stage-level operational metadata (execution times, row counts, artifact sizes, data provenance) into a unified JSON ledger published alongside every run for complete auditability.
@@ -85,14 +86,14 @@ Rather than being a simple predictive model, this is a decoupled, event-driven *
 **Engineering Highlights:**
 
 * **Defensive System Maturity Handling:** The pipeline anticipates real-world production edges. If the system is immature (e.g., within the initial 30-day lookback window) or experiences zero-traffic days, it gracefully generates 0-row schema footprints and bypasses metrics calculation to prevent pipeline crashes.
-* **Anti-Alarm Fatigue (SHAP-Guided Monitoring):** Rather than monitoring all features and triggering false positive alerts, the engine dynamically extracts the Top $N$ most important features from the Champion model's SHAP baseline, restricting covariate shift detection strictly to variables that influence predictions.
+* **Anti-Alarm Fatigue (SHAP-Guided Monitoring):** Rather than monitoring all features and triggering false positive alerts, the engine dynamically extracts the Top N most important features from the Champion model's SHAP baseline, restricting covariate shift detection strictly to variables that influence predictions.
 * **Mathematically Robust PSI:** The Population Stability Index (PSI) logic is physical-type aware. It enforces strict bin-edge and category continuity from the training reference and applies epsilon-clipping to algorithmically mitigate the Zero-Bin problem (preventing `log(0)` and divide-by-zero exceptions).
 * **Financial Calibration:** Calculates Realized ROI on the matured lookback cohort by simulating intervention costs against True/False Positives, translating statistical degradation directly into business impact.
 
 **Execution Flow:**
 
 1. **Baseline & Telemetry Resolver:** Uses DuckDB to fetch today's proactive inference telemetry. Simultaneously, it looks back 30 days, re-invokes the `SharedFeatureGenerator`, and executes an out-of-core join against the Data Lake to construct a matured evaluation cohort with actual ground-truth labels.
-2. **Statistical Drift Calculator:** Computes type-aware PSI for the target prediction distribution and the Top $N$ SHAP-ranked features against the Champion model's frozen baselines.
+2. **Statistical Drift Calculator:** Computes type-aware PSI for the target prediction distribution and the Top N SHAP-ranked features against the Champion model's frozen baselines.
 3. **Performance Evaluator:** Computes strictly proper scoring rules (Brier Score, Log Loss with epsilon clipping) and Realized ROI on the matured T-30 cohort.
 4. **Deterministic Rule Engine:** Evaluates thresholds to output an immutable boolean `need_update` payload based on three conditions: Critical Prediction Drift, Critical Feature Drift, or Severe Performance Degradation (relative Brier Score decay).
 5. **Artifact Publisher:** Uploads the comprehensive Audit Report, the Action Token (`need_update.json`), and a unified Master Execution Ledger to Hive-partitioned S3 directories, providing a clean state contract for the Master Orchestrator.
@@ -116,6 +117,10 @@ The system utilizes highly optimized, pipeline-specific Docker images built on `
 ## CI/CD & Master Orchestration
 
 The system employs strict MLOps automation, utilizing GitHub Actions as a control plane while Amazon S3 acts as the data plane. The architecture entirely decouples container execution from state management, enabling high reliability and clean lineage.
+
+### Architecture Trade-Off Note
+
+GitHub Actions is utilized as a lightweight, cost-effective orchestrator for this standalone implementation. In a scaled enterprise setting, this DAG would cleanly migrate to dedicated workflow orchestrators such as AWS Step Functions or Apache Airflow (MWAA), preserving the identical containerized pipeline interfaces.
 
 ### Continuous Integration (CI)
 
@@ -144,11 +149,8 @@ Initialize an isolated execution environment and pull the project source code:
 
 ```bash
 # Clone the repository
-git clone https://github.com/thesahilmandal/E-Commerce-Customer-Retention-Pipeline.git
-
-# Extract all files from the 'Project01' folder to the current directory and delete it
-mv Project01/* Project01/.[!.]* . 2>/dev/null || true
-rm -rf Project01
+git clone https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System.git
+cd E-Commerce-Customer-Retention-MLOps-System
 
 # Initialize isolated Python 3.12 environment
 python3.12 -m venv venv
@@ -157,6 +159,7 @@ source venv/bin/activate
 # Install pipeline dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
+
 ```
 
 ### 2. AWS Prerequisites & Configuration
@@ -165,6 +168,7 @@ pip install -r requirements.txt
 
 ```bash
 aws configure
+
 ```
 
 2. Provision two S3 buckets in your AWS account and map their **names** (not URIs) in a local `.env` file at the repository root:
@@ -172,12 +176,14 @@ aws configure
 ```env
 S3_CUSTOMER_DATABASE="<YOUR_CUSTOMER_DATABASE_BUCKET_NAME>"
 S3_PIPELINE_RUN_ARTIFACTS="<YOUR_ARTIFACTS_BUCKET_NAME>"
+
 ```
 
 3. Load the environment variables into your current shell session:
 
 ```bash
 set -a && source .env && set +a
+
 ```
 
 ### 3. Bootstrapping the Data Lake (Simulated Production Data)
@@ -190,6 +196,7 @@ python -m tools.raw_data_loader
 
 # 2. Transform into Hive-partitioned format and migrate to the Customer Database bucket
 python -m tools.hive_partitioned_generator
+
 ```
 
 ### 4. Local Pipeline Execution (End-to-End Test)
@@ -222,6 +229,7 @@ python -m pipelines.inference_pipeline.src.runner \
 python -m pipelines.monitoring_pipeline.src.runner \
   --run-id="testing_01" \
   --execution-date="$(date +%Y-%m-%d)"
+
 ```
 
 ### 5. Cloud Deployment via GitHub Actions
@@ -290,4 +298,5 @@ To orchestrate the system autonomously in the cloud via the provided CI/CD and M
 ├── .gitignore
 ├── requirements.txt
 └── README.md
+
 ```
