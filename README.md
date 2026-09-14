@@ -144,7 +144,7 @@ Initialize an isolated execution environment and pull the project source code:
 
 ```bash
 # Clone the repository
-git clone https://github.com/thesahilmandal/Project01.git
+git clone https://github.com/thesahilmandal/E-Commerce-Customer-Retention-Pipeline.git
 
 # Extract all files from the 'Project01' folder to the current directory and delete it
 mv Project01/* Project01/.[!.]* . 2>/dev/null || true
