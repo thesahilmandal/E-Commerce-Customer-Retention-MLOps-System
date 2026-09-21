@@ -1,5 +1,11 @@
 # E-commerce Customer Retention MLOps System
 
+[![Continuous Integration (CI)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml)
+
+[![Continuous Deployment (CD) - Build & Push to ECR](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml)
+
+[![Master Orchestrator (Nightly MLOps)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml)
+
 An end-to-end, automated MLOps system for customer churn prediction, production monitoring, business-driven model evaluation, and conditional retraining.
 
 ## Overview
