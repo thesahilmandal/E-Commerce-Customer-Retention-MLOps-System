@@ -1,10 +1,24 @@
 # E-commerce Customer Retention MLOps System
 
-[![Continuous Integration (CI)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml)
+<p align="center">
+  <img
+    src="docs/images/MLOps Customer Churn Architecture Diagram.png"
+    alt="End-to-end architecture of the E-commerce Customer Retention MLOps System"
+    width="1200"
+  />
+</p>
 
-[![Continuous Deployment (CD) - Build & Push to ECR](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml)
-
-[![Master Orchestrator (Nightly MLOps)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml/badge.svg)](https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml)
+<p align="center">
+  <a href="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml">
+    <img src="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/ci.yml/badge.svg" alt="Continuous Integration (CI)" />
+  </a>
+  <a href="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml">
+    <img src="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/cd.yml/badge.svg" alt="Continuous Deployment (CD) - Build & Push to ECR" />
+  </a>
+  <a href="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml">
+    <img src="https://github.com/thesahilmandal/E-Commerce-Customer-Retention-MLOps-System/actions/workflows/master_orchestrator.yml/badge.svg" alt="Master Orchestrator (Nightly MLOps)" />
+  </a>
+</p>
 
 An end-to-end, automated MLOps system for customer churn prediction, production monitoring, business-driven model evaluation, and conditional retraining.
 
